@@ -27,8 +27,8 @@
   - 周末 + 2026 美股假日不采（0230 复用同一守卫，已知边界见 POINTS 上方注释）。
   - 落库 futures_freeze_prices(trade_date, point, symbol, price, src, fetched_at)，
     symbol 如 'CL2610'/'CL2611'/'CL2612'。
-  - 落库后仅保留当天三个合约的采样，并清掉历史遗留的主力连续 symbol='CL'
-    及过期合约（不在当前活跃列表中的）。
+  - 落库后按 RETAIN_DAYS（默认 30 天，见配置区）滚动保留，并清掉历史遗留的主力连续
+    symbol='CL' 及过期合约（不在当前活跃列表中的）。
   - 采样成功经 Hermes 电报(Telegram)通道推送一条给东哥（每天三次，每次带三合约价）。
     [2026-09-17] 东哥已停微信 bot，通道统一走 Telegram（@dongge_inspect_bot，无主动消息频率限制）。
 
@@ -68,6 +68,13 @@ SINA_REF = "https://finance.sina.com.cn"
 #      ⇒ 该日无 0230，消费端逐腿退 1600（等价改动前行为，无副作用；影响约 4 天/年）。
 POINTS = {"0230": (2, 30), "1130": (11, 30), "1430": (14, 30), "1600": (16, 0)}
 POINT_LABEL = {"0230": "02:30", "1130": "11:30", "1430": "14:30", "1600": "16:00"}
+
+# 冻结价历史保留天数（含今天）。
+# [2026-09-15 东哥] 7 天 → 够做短期对比验证，但会让 §016 观察表的行在 7 天后
+#   失去可重算性（本机经 sync-freeze 全量替换后随之消失）。
+# [2026-10-01 东哥拍板] 7 天 → 30 天：给 Model B 误差观察（016）留足回填官方 NAV
+#   与重算的窗口。单日 4 时点 × 3 合约 ≈ 12 行 ⇒ 30 天约 360 行，体积可忽略。
+RETAIN_DAYS = 30
 
 # 有效近月 +1 两合约（YYMM），动态计算。
 # 规则：有效近月 = 当月 + 2（USO 在每月初 5-8 个工作日滚仓，中下旬实际持有次次月）。
@@ -250,9 +257,11 @@ def write_rows(db_path: str, trade_date: str, point: str,
                rows: list[tuple[str, float, str, str]], active_symbols: list[str]) -> int:
     """写入一批合约采样（rows: [(symbol, price, src, fetched_at), ...]），并清理旧数据。
 
-    清理策略：保留最近 7 天（今天及过去 6 天）且 symbol 在活跃列表中的行；
-    删除更早的历史、以及历史遗留的主力连续 symbol='CL' 和过期月合约，避免旧数据污染。
-    （东哥 2026-09-15 拍板：保留 7 天历史用于对比验证，而非每晚只留当天）
+    清理策略：保留最近 RETAIN_DAYS 天（今天及过去 RETAIN_DAYS-1 天）且 symbol 在活跃
+    列表中的行；删除更早的历史、以及历史遗留的主力连续 symbol='CL' 和过期月合约，
+    避免旧数据污染。
+    （东哥 2026-09-15 拍板：保留 7 天历史用于对比验证，而非每晚只留当天；
+      东哥 2026-10-01 拍板：7 天 → 30 天，见 RETAIN_DAYS 上方注释）
     返回写入行数。
     """
     conn = sqlite3.connect(db_path)
@@ -269,12 +278,12 @@ def write_rows(db_path: str, trade_date: str, point: str,
                 """,
                 (trade_date, point, symbol, price, src, fetched_at),
             )
-        # 清理：保留最近 7 天(今天及过去 6 天) 且 symbol 在活跃列表中的行；
+        # 清理：保留最近 RETAIN_DAYS 天(今天及过去 RETAIN_DAYS-1 天) 且 symbol 在活跃列表中的行；
         # 删除更早历史 + 旧主力连续('CL') + 过期月合约。
         cutoff = None
         try:
             d = datetime.strptime(trade_date, "%Y-%m-%d").date()
-            cutoff = (d - timedelta(days=6)).strftime("%Y-%m-%d")
+            cutoff = (d - timedelta(days=RETAIN_DAYS - 1)).strftime("%Y-%m-%d")
         except Exception:
             cutoff = None
         cutoff_sql = "trade_date < ? OR " if cutoff else ""
@@ -285,8 +294,8 @@ def write_rows(db_path: str, trade_date: str, point: str,
             tuple(cutoff_params + active_symbols))
         if del_cur.rowcount:
             log = logging.getLogger("cl_freeze")
-            log.info("清理旧冻结价 %d 条（保留最近7天活跃合约），cutoff=%s",
-                     del_cur.rowcount, cutoff or "n/a")
+            log.info("清理旧冻结价 %d 条（保留最近%d天活跃合约），cutoff=%s",
+                     del_cur.rowcount, RETAIN_DAYS, cutoff or "n/a")
         conn.commit()
         return len(rows)
     finally:
