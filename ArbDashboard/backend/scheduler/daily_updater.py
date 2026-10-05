@@ -2075,7 +2075,14 @@ class DailyUpdater(BaseApp):
         ① 季报持仓 本机→ARM（sync_report_holdings_to_arm，季度自动覆盖）；
         ② holding_static_val ARM自算→本地拉回（pull_oil_static_from_arm，日更）。
         失败仅记日志不中断流水线。复用 HoldingService.sync_oil_to_arm（SSH 通道）。
+
+        [AI-2026-10-03 东哥点名修复] **仅本机有效**：ARM 自身即权威源，在 ARM 上跑只会得到
+        `ssh: Could not resolve hostname arm`（arm 是本机 ~/.ssh/config 别名，ARM 无此解析），
+        每次白跑 2 次失败 SSH。与 _step_oil_recalc「仅 ARM 运行时调用」互为镜像，ARM 侧直接跳过。
         """
+        if _is_arm_runtime():
+            self.logger.info("ℹ️ [step13] ARM 运行时跳过（自身即权威源，无需推拉）")
+            return
         try:
             sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
             from services.holding_service import HoldingService
@@ -2111,6 +2118,51 @@ class DailyUpdater(BaseApp):
                     self.logger.warning(f"⚠️ [oil_recalc] {code}: {r}")
         except Exception as e:
             self.logger.warning(f"⚠️ [oil_recalc] 异常(不中断流水线): {e}")
+
+# [AI-2026-10-03 东哥拍板] daily_updater 日志保留上限（个）。
+# 口径 = 最近 10 个运行日，与 ARM systemd journald 的 MaxRetentionSec=10day 对齐。
+DAILY_LOG_RETAIN = 10
+
+
+def prune_daily_logs(keep: int = DAILY_LOG_RETAIN, log_dir: str = None) -> int:
+    """[AI-2026-10-03 东哥拍板] 清理 daily_updater_YYYYMMDD.log，只保留最近 keep 个。
+
+    背景：该日志此前**无任何清理机制**，只增不减 —— 正常交易日 ~200KB，但 A股法定
+    假期的「盘后兜底」循环曾把单日日志顶到 12.7MB(10-01) / 10.3MB(10-02)（该循环已
+    在 main.py `_after_hours_close_price_loop` 加假期门控修复）。日志按 %Y%m%d 命名，
+    多个进程并发追加同一文件 ⇒ 直接按文件名日期排序取最新 keep 个即可。
+
+    规则：仅匹配 `daily_updater_<8位数字>.log`，**绝不动** stdout_*.log / 其他 app 日志。
+    幂等、无状态、零依赖：每次 daily_updater 进程启动调用一次；旧文件可能被并发进程
+    先行删除 ⇒ 吞掉 FileNotFoundError，任何异常都不得打断主流程。
+
+    Returns: 本次实际删除的文件数（异常时返回 0）。
+    """
+    if log_dir is None:
+        log_dir = PROJECT_LOGS_DIR
+    try:
+        pat = re.compile(r'^daily_updater_(\d{8})\.log$')
+        dated = []
+        for fn in os.listdir(log_dir):
+            m = pat.match(fn)
+            if m:
+                dated.append((m.group(1), fn))
+        dated.sort()  # YYYYMMDD 升序
+        if keep <= 0:
+            stale = dated
+        else:
+            stale = dated[:-keep]  # 最旧的 (总数 - keep) 个
+        removed = 0
+        for _d, fn in stale:
+            try:
+                os.remove(os.path.join(log_dir, fn))
+                removed += 1
+            except FileNotFoundError:
+                pass
+        return removed
+    except Exception:
+        return 0
+
 
 if __name__ == "__main__":
     import argparse
@@ -2161,6 +2213,11 @@ if __name__ == "__main__":
             locked = True
 
     try:
+        # [AI-2026-10-03 东哥拍板] 启动即清理历史日志（保留最近 DAILY_LOG_RETAIN 个），幂等无副作用。
+        # 放在 lock 之后：只由真正要干活的实例执行，被 [SKIP] 挡掉的实例不做无谓 IO。
+        _n_pruned = prune_daily_logs()
+        if _n_pruned:
+            print(f"[LOG-PRUNE] 已清理 {_n_pruned} 个历史 daily_updater 日志（保留最近 {DAILY_LOG_RETAIN} 个）")
         DailyUpdater().run(nav_only=args.nav_only, refresh_morning=args.refresh_morning, static_valuation=args.static_valuation, daily_close=args.daily_close)
     finally:
         if locked:

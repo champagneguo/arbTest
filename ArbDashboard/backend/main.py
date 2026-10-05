@@ -772,6 +772,15 @@ async def lifespan(app: FastAPI):
     # 每只 12s 超时 × 数十只），导致 uvicorn 全接口超时。改为 _popen_script_once 异步子进程
     # 启动 daily_updater --daily-close（与 15:35 流水线同款，不阻塞事件循环）。
     try:
+        # [AI-2026-10-03 东哥点名修复] 复用 A股交易日历（chinese_calendar + _HOLIDAYS_2026 兜底）。
+        # 仅用于下方盘后兜底循环的「非交易日」门控；取不到时降级 None（退回仅周末过滤），
+        # 绝不影响其他功能。与 daily_updater.py 同口径（arbcore.utils.market_calendar）。
+        try:
+            from arbcore.utils.market_calendar import is_trading_day as _is_cn_trading_day
+        except Exception as _e:
+            _is_cn_trading_day = None
+            logger.warning(f"[AFTER_HOURS] A股交易日历不可用，退回仅周末过滤: {_e}")
+
         def _count_today_close_prices(_db, _date):
             """[AI-2026-09-02] 同步 DB 查询，只供 asyncio.to_thread 调用。
             绝不能在 asyncio 事件循环（MainThread）里直接连 SQLite —— 一旦等锁，
@@ -792,6 +801,12 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(30)
                 _n = _dt.now()
                 if _n.weekday() in (5, 6) or _n.hour < 15:
+                    continue
+                # [AI-2026-10-03 东哥点名修复] A股法定假期（国庆/春节等）全市场无场内价 ⇒ 下方
+                # 「今天 price 非空行数 > 0」判据恒为 0 ⇒ 每 30s 冷启动一次 daily_updater
+                # --daily-close、永不退出（10-01 实测耗尽全部 1080 个槽位/天、单日日志放大 60 倍）。
+                # 与 daily_updater.py 同口径复用 is_trading_day('A_SHARE')。
+                if _is_cn_trading_day is not None and not _is_cn_trading_day('A_SHARE', _n.date()):
                     continue
                 # 幂等检查：DB中今天是否已有收盘价？
                 _today = _n.strftime('%Y-%m-%d')
