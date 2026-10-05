@@ -57,12 +57,12 @@ export function getFundHoldingValuation(code: string, period: string) {
 }
 
 /** 季报持仓分析：持仓静态估值核心列（读本地缓存 holding_static_val，B方案） */
-export function getFundHoldingRecalc(code: string, period: string = '2026H1', start: str = '2026-07-01') {
+export function getFundHoldingRecalc(code: string, period: string = '2026H1', start: string = '2026-07-01') {
   return client.get(`/api/fund/${code}/holding-recalc`, { params: { period, start } })
 }
 
 /** 季报持仓分析：持仓静态估值全量诊断（etf_prices/fill_warning/note，按需从 ARM 取） */
-export function getFundHoldingRecalcDetail(code: string, period: string = '2026H1', start: str = '2026-07-01') {
+export function getFundHoldingRecalcDetail(code: string, period: string = '2026H1', start: string = '2026-07-01') {
   return client.get(`/api/fund/${code}/holding-recalc-detail`, { params: { period, start } })
 }
 

@@ -877,7 +877,15 @@ class HoldingService:
                 r_fx = fxc1 / fxc0 - 1.0
                 r_i = (1.0 + r_local) * (1.0 + r_fx) - 1.0
                 r_basket += (per["usable"][s] / pos) * r_i
-                fx_detail[s] = {"cur": cur, "r_fx": round(r_fx, 6)}
+                # [AI-2026-10-05 东哥需求·导出核对 CSV] 除 r_fx 外额外带出汇率**两日原值**
+                # fx0/fx1：人工核对时必须能从「汇率前日→汇率当日」独立复算 r_fx，
+                # 而不是拿程序算好的 r_fx 去验证程序自己（自证等于没验）。
+                fx_detail[s] = {
+                    "cur": cur,
+                    "fx0": round(fxc0, 6),
+                    "fx1": round(fxc1, 6),
+                    "r_fx": round(r_fx, 6),
+                }
             if fx_missing:
                 prev_nav = nav
                 prev_nav_date = d if nav is not None else None
@@ -904,6 +912,9 @@ class HoldingService:
             carried_symbols = [s for s in syms if d not in price_rows.get(s, {})]
             carried_forward = len(carried_symbols) > 0
             usd_ref = _fill(fx_rows["usd_cny_mid"], d)
+            # [AI-2026-10-05 东哥需求·导出核对 CSV] 一并带出 USD/CNY 前一日值，
+            # 让「汇率」这一项在人工核对时也是两日原值（而非只有 T 日 + 程序算的涨跌）。
+            usd_ref_prev = _fill(fx_rows["usd_cny_mid"], prev_date)
             rows.append({
                 "date": d,
                 "report_period": per["period"],
@@ -913,9 +924,20 @@ class HoldingService:
                 "err_pct": round(err * 100, 4) if err is not None else None,
                 "err_bp": round(err * 10000, 2) if err is not None else None,
                 "prev_official_nav": round(prev_nav, 6),
+                # [AI-2026-10-05 东哥需求·导出核对 CSV] 复算所需的三个"原始输入"，
+                # 此前只存在于 periods[]（期级）与内部变量里，逐行导出后 CSV 才能自洽：
+                #   pos_pct        = 该行有效权重和(%)，即 est = prev_nav*(1 + pos_pct/100*r_basket) 的 pos。
+                #                    命名与 Model B（get_realtime_valuation）的 pos_pct 对齐 —— 两处
+                #                    语义相同（r_basket 归一化的分母），不另立叫法。
+                #   weights        = 该行各腿**原始**权重(%)（未按 pos 归一，归一由公式里 /pos_pct 完成）
+                #   basket_change_pct = r_basket × 100，供与 Excel 公式列逐行比对
+                "pos_pct": round(pos, 4),
+                "weights": {s: round(per["usable"][s], 4) for s in syms},
+                "basket_change_pct": round(r_basket * 100, 6),
                 "etf_prices": {s: round(p1[s], 4) for s in syms},
                 "etf_prev": {s: round(p0[s], 4) for s in syms},
                 "usd_cny": round(usd_ref, 4) if usd_ref is not None else None,
+                "usd_cny_prev": round(usd_ref_prev, 4) if usd_ref_prev is not None else None,
                 "fx_detail": fx_detail,
                 "note": "; ".join(note_parts) if note_parts else "",
                 "fill_warning": fill_warning,

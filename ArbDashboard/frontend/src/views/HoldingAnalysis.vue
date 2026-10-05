@@ -219,7 +219,20 @@
           <template #header>
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
               <div style="font-size: 14px; font-weight: bold;">持仓静态估值（7-1 至今）</div>
-              <n-button size="small" @click="trackingModalShow = true">季报仓位跟踪</n-button>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <!-- [AI-2026-10-05 东哥需求] 导出人工核对用 CSV（汇率两日原值 + 底层 ETF 明细 + Excel 公式） -->
+                <n-button
+                  size="small"
+                  type="primary"
+                  ghost
+                  :disabled="!recalcDisplayRows.length"
+                  title="导出核对表：一行一日期，含各腿两日 ETF 收盘价/两日汇率原值/权重，派生列全为 Excel 公式"
+                  @click="exportStaticValuationCsv"
+                >
+                  导出历史静态估值 CSV
+                </n-button>
+                <n-button size="small" @click="trackingModalShow = true">季报仓位跟踪</n-button>
+              </div>
             </div>
           </template>
           <n-empty v-if="!recalcDisplayRows.length" description="该基金暂无持仓静态估值数据" />
@@ -235,6 +248,12 @@
           />
           <div v-if="recalcDetailLoading" style="font-size: 11px; color: #94a3b8; margin-top: 6px;">
             诊断细节加载中（底层 ETF / 缺价标注）…
+          </div>
+          <div
+            v-if="staticCsvMsg"
+            :style="{ fontSize: '11px', marginTop: '6px', color: staticCsvMsg.startsWith('✅') ? '#16a34a' : '#dc2626' }"
+          >
+            {{ staticCsvMsg }}
           </div>
         </n-card>
       </template>
@@ -959,6 +978,11 @@ const CSV_HEADERS = [
 ]
 const csvNum = (v: any, d = 6) => (v == null || v === '' || isNaN(Number(v))) ? '' : Number(v).toFixed(d)
 const csvPct = (v: any, d = 6) => (v == null || v === '' || isNaN(Number(v))) ? '' : (Number(v) * 100).toFixed(d)
+/** CSV 单元转义（含逗号/引号/换行 → 双引号包裹）。两个导出功能共用，勿各自实现一份。 */
+const csvEsc = (v: any) => {
+  const s = (v == null) ? '' : String(v)
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+}
 const exportCompareCsv = () => {
   const now = new Date()
   const p2 = (n: number) => String(n).padStart(2, '0')
@@ -1017,13 +1041,9 @@ const exportCompareCsv = () => {
       })
     }
   }
-  const esc = (v: any) => {
-    const s = (v == null) ? '' : String(v)
-    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
-  }
   // \uFEFF BOM：保证 Excel 双击打开中文不乱码
   const csv = '\uFEFF' + [CSV_HEADERS.join(',')]
-    .concat(out.map(r => CSV_HEADERS.map(h => esc(r[h])).join(',')))
+    .concat(out.map(r => CSV_HEADERS.map(h => csvEsc(r[h])).join(',')))
     .join('\r\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -1035,6 +1055,136 @@ const exportCompareCsv = () => {
   document.body.removeChild(a)
   setTimeout(() => URL.revokeObjectURL(url), 3000)
 }
+// ============================================================================
+// [AI-2026-10-05 东哥需求] 导出「持仓静态估值」人工核对 CSV
+//
+// 东哥原话：「我的主要目的，不是要导出静态估值本身，而是要手工来计算核对静态估值，
+// 所以需要导出汇率和底层 ETF 明细，并且最好 CSV 里面能带计算公式」。
+// ⇒ 设计原则：**凡派生量一律写成 Excel 公式**，表里只保留原始输入（两日 ETF 收盘价、
+//   两日汇率原值、各腿原始权重、T-1 官方净值）。这样打开 CSV 拖一下就验完，
+//   而不是拿程序算好的数字去验证程序自己（自证＝没验）。
+//
+// 形状：宽表 —— 一行一日期；一腿一个 9 列块；尾部 4 个复算列。选宽表不选长表的理由：
+//   宽表所有公式都是**同一行内横向引用**，拖拽即整列生效；长表要靠 SUMIF 跨行捞腿，
+//   漏写一行汇总会静默算错 —— 不适合「肉眼核对」这个用途。
+//
+// 复算链（与后端 holding_service.get_recalc_history 严格同式，两边不得各自发挥）：
+//   r_local_i = 当日价/前日价 − 1
+//   r_fx_i    = 汇率当日/汇率前日 − 1
+//   r_i       = (1 + r_local_i) × (1 + r_fx_i) − 1
+//   篮子变动% = Σ (权重_i / pos_pct) × r_i × 100
+//   总变动%   = pos_pct × 篮子变动% / 100        （= pos_pct/100 × r_basket，百分数计）
+//   静态估值  = T-1官方净值 × (1 + 总变动%/100)
+//   误差%     = (静态估值 / 当日官方净值 − 1) × 100
+// ⚠️ 分母 pos_pct（有效权重和）与各腿原始权重分开两列：有腿被剔除时二者不等；
+//    权重列必须保持「季报原始值」才可核对，归一化交给公式里的 /pos_pct。
+// ============================================================================
+/** 1-based 列号 → Excel 列名（A/B/…/Z/AA…） */
+const csvColLetter = (n: number): string => {
+  let s = ''
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26) }
+  return s
+}
+/** 腿列块内 9 列的顺序（表头与公式定位共用同一常量，防止两处错位） */
+const STATIC_LEG_COLS = ['权重%', '前日价', '当日价', '币种', '汇率前日', '汇率当日', '本地涨跌%', '汇率涨跌%', '腿贡献%']
+const STATIC_HEAD_COLS = [
+  '导出时间(北京)', '基金代码', '基金名称', '日期', '报告期', '覆盖率%',
+  'T-1官方净值(基数)', '官方净值(T日)', '有效权重和%(pos_pct)',
+  '篮子变动%(程序)', '静态估值(程序)', '误差%(程序)', 'USD/CNY前日', 'USD/CNY当日',
+]
+const STATIC_TAIL_COLS = ['篮子变动%(公式)', '总变动%(公式)', '静态估值(公式)', '误差%(公式)', '备注']
+const staticCsvMsg = ref('')
+const exportStaticValuationCsv = () => {
+  staticCsvMsg.value = ''
+  // 待补行（美股价未入库）本就没有估值；无诊断明细的行缺腿、无法复算 —— 两者都不进核对表。
+  const all = recalcDisplayRows.value
+  const rows = all.filter((r: any) => !r.pending && r.weights && Object.keys(r.weights).length)
+  if (!rows.length) {
+    staticCsvMsg.value = '❌ 暂无可导出的行（诊断明细未加载，或全部为「待补」），请刷新页面后重试'
+    return
+  }
+  const skipped = all.length - rows.length
+  // 腿并集：按首次出现顺序（后端 weights 顺序 = 季报持仓权重序），跨报告期取并集
+  const legs: string[] = []
+  for (const r of rows) for (const s of Object.keys(r.weights)) if (!legs.includes(s)) legs.push(s)
+
+  const header = [
+    ...STATIC_HEAD_COLS,
+    ...legs.flatMap((s) => STATIC_LEG_COLS.map((c) => `${s}${c}`)),
+    ...STATIC_TAIL_COLS,
+  ]
+  // 关键列字母（公式拼接用），从表头位置反推，避免手写数字与表头脱钩
+  const cPrevNav = csvColLetter(STATIC_HEAD_COLS.indexOf('T-1官方净值(基数)') + 1)
+  const cNav = csvColLetter(STATIC_HEAD_COLS.indexOf('官方净值(T日)') + 1)
+  const cPos = csvColLetter(STATIC_HEAD_COLS.indexOf('有效权重和%(pos_pct)') + 1)
+  const legStart = STATIC_HEAD_COLS.length + 1
+  const tailStart = legStart + legs.length * STATIC_LEG_COLS.length
+  const cBasket = csvColLetter(tailStart)
+  const cTotal = csvColLetter(tailStart + 1)
+  const cEst = csvColLetter(tailStart + 2)
+
+  const now = new Date()
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const stampStr = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`
+
+  const out: any[][] = [header]
+  rows.forEach((r: any, i: number) => {
+    const R = i + 2  // 第 1 行是表头
+    const row: any[] = [
+      stampStr, fundCode.value, fundName.value || fundCode.value, r.date, r.report_period ?? '',
+      csvPct(r.coverage, 2),
+      csvNum(r.prev_official_nav, 6),
+      csvNum(r.official_nav, 6),
+      csvNum(r.pos_pct, 4),
+      csvNum(r.basket_change_pct, 6),
+      csvNum(r.holding_static_val, 6),
+      csvNum(r.err_pct, 4),
+      csvNum(r.usd_cny_prev, 4),
+      csvNum(r.usd_cny, 4),
+    ]
+    const contribCells: string[] = []
+    legs.forEach((s, j) => {
+      const b = legStart + j * STATIC_LEG_COLS.length
+      const L = { w: csvColLetter(b), p0: csvColLetter(b + 1), p1: csvColLetter(b + 2), f0: csvColLetter(b + 4), f1: csvColLetter(b + 5), rl: csvColLetter(b + 6), rf: csvColLetter(b + 7), rc: csvColLetter(b + 8) }
+      const inBasket = r.weights?.[s] != null
+      const fx: any = r.fx_detail?.[s] || {}
+      row.push(
+        inBasket ? csvNum(r.weights[s], 4) : '',
+        csvNum(r.etf_prev?.[s], 4),
+        csvNum(r.etf_prices?.[s], 4),
+        fx.cur ?? (inBasket ? 'USD' : ''),
+        csvNum(fx.fx0, 6),
+        csvNum(fx.fx1, 6),
+        // 以下三列一律用公式，不写程序算好的数 —— 这三列就是"给人自己算"的
+        `=IF(OR(${L.p0}${R}="",${L.p1}${R}=""),"",ROUND((${L.p1}${R}/${L.p0}${R}-1)*100,6))`,
+        `=IF(OR(${L.f0}${R}="",${L.f1}${R}=""),"",ROUND((${L.f1}${R}/${L.f0}${R}-1)*100,6))`,
+        `=IF(${L.w}${R}="","",ROUND(${L.w}${R}/$${cPos}${R}*((1+${L.rl}${R}/100)*(1+${L.rf}${R}/100)-1)*100,6))`,
+      )
+      contribCells.push(`${L.rc}${R}`)
+    })
+    row.push(
+      `=ROUND(SUM(${contribCells.join(',')}),6)`,
+      `=ROUND($${cPos}${R}*${cBasket}${R}/100,6)`,
+      `=ROUND($${cPrevNav}${R}*(1+${cTotal}${R}/100),6)`,
+      `=IF($${cNav}${R}="","",ROUND((${cEst}${R}/$${cNav}${R}-1)*100,4))`,
+      [r.fill_warning ? '⚠️' : '', r.carried_forward ? '🔸T日沿用上一收盘' : '', r.note || ''].filter(Boolean).join(' '),
+    )
+    out.push(row)
+  })
+
+  const csv = '\uFEFF' + out.map((r) => r.map(csvEsc).join(',')).join('\r\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `持仓静态估值核对_${fundCode.value}_${now.getFullYear()}${p2(now.getMonth() + 1)}${p2(now.getDate())}_${p2(now.getHours())}${p2(now.getMinutes())}.csv`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 3000)
+  staticCsvMsg.value = `✅ 已导出 ${rows.length} 行 × ${legs.length} 条腿${skipped ? `（跳过 ${skipped} 行待补/无明细）` : ''}`
+}
+
 /** 对比弹窗标题用：取三基金同一合约月的 CL 实时价（任一非空即可，三基金值相同） */
 const compareClNow = computed(() => {
   for (const r of compareRows.value) {
