@@ -64,6 +64,8 @@ ArbDashboard/data/
 # --- AI 临时调试脚本（不传）---
 _ai_backup/
 scratch/
+# 临时指令文件（文件名含"给 AI 的修改指令"，误提交；10-08 移出跟踪）
+arbcore/fetchers/20260508*
 
 # --- 构建产物 & 依赖 ---
 __pycache__/
