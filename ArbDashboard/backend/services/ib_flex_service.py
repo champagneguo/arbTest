@@ -4,7 +4,7 @@
 设计边界（东哥 2026-09-25 拍板）：
   - 纯 HTTP 直连 Flex Web Service，**不依赖 IB Gateway/TWS 是否在线**，与 ib_reader.py 解耦。
   - 零第三方依赖：仅用标准库（urllib / xml.etree / sqlite3），本机无 pandas 也能跑。
-  - 落库到本地 arb_tran.db（与 arbitrage_pairs 同库，database/ 下，物理隔离不进 git）。
+  - 落库到本地 arb_tran.db（与 arbitrage_pairs 同库；跟随主库同目录，物理隔离不进 git）。
   - **不直接回填 arbitrage_pairs**（V7 为唯一真源）；只作为"IB 路官方结算口径"独立真相源，
     提供 reconcile_flex_vs_book() 自动差异核对（Flex 官方成交/FX/费用 vs V7 记的 IB 对冲腿）。
   - 安全：Token/QueryID 只从 .env（项目根，仓库外）或环境变量读，绝不硬编码、绝不打印。
@@ -79,13 +79,28 @@ def _resolve_project_root():
 
 
 def _resolve_db_path(explicit=None):
+    """交易库路径（单一出处：跟随主库同目录，与 backend/main.py:226 同款）。
+
+    优先级：显式参数 -> ARB_TRAN_DB env -> 主库同目录的 arb_tran.db
+    （主库经 arbcore._resolve_db_path() 定位，即 env ARB_MASTER_DB 优先 -> _shared 回退）。
+    旧写法拼 <项目根>/database/arb_tran.db，在 2026-10-06 主库收敛到 _shared/ 后
+    会落到搬迁遗留库上，造成「IB Flex 写这边、盘后对账读 _shared 空库」的分叉。
+    """
     if explicit:
         return explicit
     env = os.environ.get("ARB_TRAN_DB")
     if env:
         return env
-    root = _resolve_project_root()
-    return os.path.join(root, "database", "arb_tran.db")
+    try:
+        src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        if src_root not in sys.path:
+            sys.path.insert(0, src_root)
+        from arbcore.database.db_manager import _resolve_db_path as _resolve_master_db
+        return os.path.join(os.path.dirname(_resolve_master_db()), "arb_tran.db")
+    except Exception as e:
+        logger.warning(f"[IB-Flex] 统一解析主库失败({e})，回退项目根 database/")
+        root = _resolve_project_root()
+        return os.path.join(root, "database", "arb_tran.db")
 
 
 def _load_env(extra_path=None):
@@ -104,6 +119,9 @@ def _load_env(extra_path=None):
         candidates.append(extra_path)
     root = _resolve_project_root()
     candidates.append(os.path.join(root, ".env"))
+    # 3) 集中密钥目录（D:/Study/ARB/account_info，不进任何仓库），可用 ARB_ACCOUNT_INFO_DIR 覆盖
+    _ai = os.environ.get("ARB_ACCOUNT_INFO_DIR", r"D:\Study\ARB\account_info")
+    candidates.append(os.path.join(_ai, "lofararb.env"))
     for p in candidates:
         if os.path.isfile(p):
             try:

@@ -75,7 +75,14 @@ def reconcile_fund_static_val(fund_code: str, days: int = 10) -> dict:
         stats["nav_err"] = str(e)
 
     # 3. 级联底层 ETF（VGT 等）日价 -> usa_etf_daily_prices（static_val 依赖它）
-    for item in (fund.get('valuation_portfolio') or fund.get('hedging_portfolio') or []):
+    # [AI-2026-10-07 东哥抓错] 指数法基金（valuation_method=index）的 valuation_portfolio 装的是"指数名"，
+    #   绝不能当美股 ETF 从新浪拉价写进 usa_etf_daily_prices —— 会同名美股 ETF 撞车污染：
+    #   如 DAX 指数(~25266) 撞 Global X DAX Germany ETF(美股代码也叫 DAX，~44.71)；写进去后
+    #   get_fund_history 会把它当 "DAX_price" 用 → 历史弹窗显示 44.71。指数历史由下方步骤 3.5
+    #   repair_fund_index_history 补进 index_history（正确来源）。
+    _vm = str(fund.get('valuation_method') or '').strip().lower()
+    _vp_symbols = [] if _vm == 'index' else (fund.get('valuation_portfolio') or fund.get('hedging_portfolio') or [])
+    for item in _vp_symbols:
         sym = str(item.get('symbol')).lstrip('^')
         try:
             edf = hist.get_prices(sym, source='sina', start_date=us_start)

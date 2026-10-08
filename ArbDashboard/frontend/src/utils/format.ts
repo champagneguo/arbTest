@@ -10,12 +10,12 @@ export function cleanFundName(name: string): string {
     .replace('国瑞白银期货', '白银期货')
 }
 
-/** 红色（涨/溢价） */
-export const COLOR_UP = '#f44336'
-/** 绿色（跌/折价） */
-export const COLOR_DOWN = '#4caf50'
-/** 灰色（无变化） */
-export const COLOR_FLAT = '#888'
+/** 红色（涨/溢价）— 与 App.vue --co-up 同值，全站统一淡雅红 */
+export const COLOR_UP = '#d64045'
+/** 绿色（跌/折价）— 与 --co-down 同值 */
+export const COLOR_DOWN = '#2e9e5b'
+/** 灰色（无变化）— 与 --co-neutral 同值 */
+export const COLOR_FLAT = '#8a929e'
 /** 灰色（次要文字） */
 export const COLOR_MUTED = '#64748b'
 
@@ -64,9 +64,10 @@ export function formatValuation(value: number | null | undefined): string {
 }
 
 /** 成交额（万元）格式化 */
+/** 成交额格式化（整数，万） */
 export function formatVolume(value: number | null | undefined): string {
   if (value === null || value === undefined || value <= 0) return '-'
-  return Number(value).toFixed(2)
+  return Number(value).toFixed(0)
 }
 
 /** 份额格式化（整数） */

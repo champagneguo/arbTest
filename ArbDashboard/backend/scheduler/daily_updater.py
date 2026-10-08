@@ -19,6 +19,9 @@ from arbcore.fetchers.historical import HistoricalDataManager
 from arbcore.fetchers.woody_web_crawler import WoodyWebCrawler
 from arbcore.fetchers.woody_api_service import WoodyAPIService
 from arbcore.calculators.static_valuation import StaticValuationCalculator
+# [AI-2026-10-07 东哥抓错] 欧元基金清单（德/法 QDII）。step11 静态估值对这批基金必须用 eur_cny_mid，
+# 不能用美元（口径与 common.py resolve_fx / dynamic_valuation.py 对称）。
+from arbcore.analysis.common import EUR_FUND_CODES
 # [AI-2026-09-28 东哥点名] A股交易日历（含中国法定假日，chinese_calendar + _HOLIDAYS_2026 兜底）。
 # 原 step4 内两处「上一交易日」只跳周末 ⇒ 9-25(中秋) 被当成交易日，预期净值日长期落后、
 # 每次跑都白抓一次东财（当日日志 501018 出现 498 次即此）；收盘价齐全判定同病。
@@ -63,7 +66,7 @@ def _save_no_kline_denylist(d):
 def _is_arm_runtime() -> bool:
     """本进程是否跑在 ARM(H5) 部署机上 —— 与 backend/main.py 的 _is_arm 同口径（按库路径区分）。
 
-    ARM 库在 ~/arbtest/（POSIX 路径），本机在 Windows D:\\Study\\arbTest\\。
+    ARM 库在 /home/ubuntu/（POSIX 路径），本机在 Windows（如 D:/Study/ARB/_shared/）。
     用于区分「同一套日终代码」在本机与 ARM 上的分支行为。
     """
     try:
@@ -77,7 +80,7 @@ def _is_arm_runtime() -> bool:
 class DailyUpdater(BaseApp):
     def __init__(self):
         scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        logs_dir = PROJECT_LOGS_DIR  # [AI-2026-08-16] 统一到仓库外唯一日志根(本地 D:\Study\arbTest\logs / ARM 同理)
+        logs_dir = PROJECT_LOGS_DIR
         super().__init__("daily_updater", app_dir=scripts_dir, log_dir=logs_dir)
         # [AI-2026-07-08] 移除：BaseApp 现已在 arbcore/config/ 优先查找，无需重复重定向
         self.woody_crawler = WoodyWebCrawler()
@@ -498,6 +501,7 @@ class DailyUpdater(BaseApp):
                     usd_val = content.get('usd_cny_mid')
                     hkd_val = content.get('hkd_cny_mid')
                     jpy_val = content.get('jpy_cny_mid')
+                    eur_val = content.get('eur_cny_mid')
                     cny_spot_val = content.get('usd_cny_spot')
                     cnh_val = content.get('usd_cnh')
                     # 中间价缺失则尝试用其他汇率备用源日期，避免整条跳过
@@ -508,10 +512,11 @@ class DailyUpdater(BaseApp):
                             usd_cny_mid=usd_val,
                             hkd_cny_mid=hkd_val,
                             jpy_cny_mid=jpy_val,
+                            eur_cny_mid=eur_val,
                             usd_cny_spot=cny_spot_val,
                             usd_cnh=cnh_val,
                         )
-                        self.logger.info(f"   ✅ [VPS] 同步入库汇率: {date_info_str} -> USD:{usd_val}, HKD:{hkd_val}, JPY:{jpy_val}, CNYSpot:{cny_spot_val}, CNH:{cnh_val}")
+                        self.logger.info(f"   ✅ [VPS] 同步入库汇率: {date_info_str} -> USD:{usd_val}, HKD:{hkd_val}, JPY:{jpy_val}, EUR:{eur_val}, CNYSpot:{cny_spot_val}, CNH:{cnh_val}")
                         # 标记云端文件在此日期已完成同步
                         self.db.mark_access_synced(file_date, 'fx_vps_sync')
                 except Exception as e:
@@ -545,13 +550,14 @@ class DailyUpdater(BaseApp):
                 date_info = exchange_rate_data.get('日期')
                 usd_val = exchange_rate_data.get('usd_cny_mid')
                 hkd_val = exchange_rate_data.get('hkd_cny_mid')
+                eur_val = exchange_rate_data.get('eur_cny_mid')
                 # [A根因修复 2026-09-18] 中间价尚未发布(usd/hkd为空)时，绝不 upsert 今天行
                 # 避免建出"中间价=NULL"的脏行；保留已有最新行，待 9:15 后官方发布再补
                 if date_info and usd_val is not None and hkd_val is not None:
                     try:
                         date_info_str = pd.to_datetime(str(date_info)).strftime('%Y-%m-%d')
-                        self.db.upsert_exchange_rate(date_info_str, usd_cny_mid=usd_val, hkd_cny_mid=hkd_val)
-                        self.logger.info(f"✅ 人民币中间价入库: {date_info_str} -> USD:{usd_val}, HKD:{hkd_val}")
+                        self.db.upsert_exchange_rate(date_info_str, usd_cny_mid=usd_val, hkd_cny_mid=hkd_val, eur_cny_mid=eur_val)
+                        self.logger.info(f"✅ 人民币中间价入库: {date_info_str} -> USD:{usd_val}, HKD:{hkd_val}, EUR:{eur_val}")
 
                         # 关键修复：只有当抓取到的汇率实际生效日期是今天（或更晚）时，才标记今日已同步
                         # 如果抓到的是昨天的日期，说明今天最新的还没更新，我们绝不标记今日同步，以便稍后重试
@@ -660,6 +666,23 @@ class DailyUpdater(BaseApp):
                         self.logger.info(f"✅ [Level 1] JPY/CNY 在岸价入库: {jpy_spot_date} -> {jpy_spot_rate}")
         except Exception as e:
             self.logger.error(f"❌ [Level 1] JPY/CNY 在岸价直连失败: {e}")
+        # [AI-2026-10-07] EUR/CNY 在岸价——QDII欧洲 德/法 ETF 实时估值 fx_base 用（与 USD/JPY 同管道）
+        try:
+            conn_eur_spot = self.db._get_conn()
+            has_eur_spot = conn_eur_spot.execute(
+                "SELECT COUNT(*) FROM exchange_rate WHERE date = ? AND eur_cny_spot IS NOT NULL", (today_str,)
+            ).fetchone()[0] > 0
+            conn_eur_spot.close()
+            if not has_eur_spot:
+                eur_spot_data = data_fetcher.fetch_eur_cny_spot_rate()
+                if eur_spot_data:
+                    eur_spot_date = pd.to_datetime(str(eur_spot_data.get('日期', today_str))).strftime('%Y-%m-%d')
+                    eur_spot_rate = eur_spot_data.get('eur_cny_spot')
+                    if eur_spot_rate is not None:
+                        self.db.upsert_exchange_rate(eur_spot_date, eur_cny_spot=eur_spot_rate)
+                        self.logger.info(f"✅ [Level 1] EUR/CNY 在岸价入库: {eur_spot_date} -> {eur_spot_rate}")
+        except Exception as e:
+            self.logger.error(f"❌ [Level 1] EUR/CNY 在岸价直连失败: {e}")
 
     def _safe_save_fund_data(self, date_str, fund_code, price=None, nav=None, trade_volume=None, volume=None):
         """
@@ -809,6 +832,62 @@ class DailyUpdater(BaseApp):
             return t
 
         import requests
+        import time
+        import json
+
+        # === [BUG-2026-10-06-05 修复] 腾讯K线被 WAF 拦截(HTTP 501)，新增新浪兜底 ===
+        # 腾讯仍为首选（WAF 解除后自动恢复）；WAF/解析失败/无数据 → 退新浪 A 股K线。
+        # 新浪 A 股代码规则与腾讯一致（sz/sh 按交易所），直接复用 tx_code，of 前缀不通。
+        def _fetch_tencent_kline(tx_code):
+            """返回 (status, items, qt_close)；status: 'ok' | 'no_data' | 'fail'"""
+            try:
+                url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param={tx_code},day,,,5,qfq&r=0.{time.time()}"
+                resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12,
+                                    proxies={"http": None, "https": None})
+                txt = resp.text
+                if "=" in txt:
+                    txt = txt.split("=", 1)[1]
+                data = json.loads(txt)
+                dd = data.get("data")
+                if not isinstance(dd, dict):
+                    return ('fail', None, None)
+                node = dd.get(tx_code, {})
+                kline = node.get("day") or node.get("qfqday")
+                if not kline:
+                    return ('no_data', None, None)
+                items = list(kline.values()) if isinstance(kline, dict) else kline
+                qt_node = node.get("qt", {}).get(tx_code)
+                qt_close = None
+                if isinstance(qt_node, list) and len(qt_node) > 3 and qt_node[3]:
+                    try:
+                        qt_close = float(qt_node[3])
+                    except (ValueError, TypeError):
+                        qt_close = None
+                return ('ok', items, qt_close)
+            except Exception as e:
+                self.logger.debug(f"🔄 [{tx_code}] 腾讯K线失败，转新浪兜底: {e}")
+                return ('fail', None, None)
+
+        def _fetch_sina_kline(tx_code):
+            """新浪 A 股K线兜底，返回与腾讯 day 同构的 items 列表 或 None（无数据/失败）"""
+            try:
+                url = f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={tx_code}&scale=240&ma=no&datalen=5"
+                resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0",
+                                    "Referer": "https://finance.sina.com.cn/"}, timeout=12,
+                                    proxies={"http": None, "https": None})
+                arr = resp.json()
+                if not isinstance(arr, list) or not arr:
+                    return None
+                items = []
+                for d in arr:
+                    vol_shares = float(d.get('volume') or 0)
+                    # 新浪 volume 单位=股，腾讯 day[5]=手(1手=100份) → /100 对齐
+                    items.append([d.get('day'), float(d.get('open', 0)), float(d.get('close', 0)),
+                                  float(d.get('high', 0)), float(d.get('low', 0)), vol_shares / 100.0])
+                return items
+            except Exception as e:
+                self.logger.debug(f"🔄 [{tx_code}] 新浪K线兜底也失败: {e}")
+                return None
 
         for code in all_codes:
             if not code: continue
@@ -838,86 +917,61 @@ class DailyUpdater(BaseApp):
                         self.logger.debug(f"⏭️ [{code}] 近期收盘价已齐全，跳过重爬")
                         continue
 
-            try:
-                # 腾讯日K线：返回 [date, open, close, high, low, volume, ...]
-                url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param={tx_code},day,,,5,qfq&r=0.{__import__('time').time()}"
-                resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12,
-                                    proxies={"http": None, "https": None})
-                txt = resp.text
-                if "=" in txt:
-                    txt = txt.split("=", 1)[1]
-                data = __import__("json", fromlist=["json"]).loads(txt)
-                # [AI-2026-08-20] 防御：腾讯接口对少数基金返回 data="数据"（空字符串），直接跳过
-                dd = data.get("data")
-                if not isinstance(dd, dict):
-                    self.logger.warning(f"⚠️ [{code}] 腾讯K线响应异常: data字段非dict (type={type(dd).__name__})，跳过")
-                    continue
-                node = dd.get(tx_code, {})
-                kline = node.get("day") or node.get("qfqday")
-                if not kline:
-                    # [AI-2026-08-03] 首次探测到无K线：写入跳过名单，避免后续每次启动刷 WARNING
-                    if code not in no_kline:
-                        no_kline[code] = "腾讯/新浪均无日K线(债券/封闭LOF)"
-                        _save_no_kline_denylist(no_kline)
-                        self.logger.warning(f"⚠️ [{code}] 腾讯K线无数据（已加入跳过名单，后续不再报错）")
-                    else:
-                        self.logger.debug(f"⏭️ [{code}] 腾讯K线无数据（已在跳过名单）")
-                    continue
-                items = list(kline.values()) if isinstance(kline, dict) else kline
-
-                # [AI-2026-08-04] 修复：腾讯 K 线 qfqday 的 close 对部分基金(如160644)只给 2 位小数，
-                # 而同响应 qt 行情数组的 [3] 项才是最新收盘(3 位精度，与雪球/新浪一致)。当最新日 K 线
-                # close 精度低于 qt 收盘且两者接近时，改用 qt 收盘，避免 DB 收盘价被截成 1.61(实为1.613)。
-                qt_node = node.get("qt", {}).get(tx_code)
+            # === 腾讯首选，WAF/解析失败则新浪兜底 (BUG-2026-10-06-05) ===
+            k_status, items, qt_close = _fetch_tencent_kline(tx_code)
+            if k_status == 'fail':
+                self.logger.info(f"🔄 [{code}] 腾讯K线被WAF拦截，改用新浪兜底")
+                items = _fetch_sina_kline(tx_code)
                 qt_close = None
-                if isinstance(qt_node, list) and len(qt_node) > 3 and qt_node[3]:
-                    try:
-                        qt_close = float(qt_node[3])
-                    except (ValueError, TypeError):
-                        qt_close = None
-
-                written = 0
-                for it in items:
-                    # 腾讯day格式: [date, open, close, high, low, volume(手), amount?]
-                    k_date = str(it[0])
-                    k_close = float(it[2]) if len(it) > 2 and it[2] else 0
-                    # [2026-07-30] 成交量(手)：1 手 = 100 份；换手率 = 成交量(手) / 份额(万) × 100，与 woody 网页对齐
-                    k_volume = float(it[5]) if len(it) > 5 and it[5] else 0
-                    # [FIX 2026-09-11] 成交额(万元) = 成交量(手)×100×收盘 / 10000 = k_volume×k_close/100。
-                    # 腾讯 qfq 日K线无独立成交额字段，由成交量×收盘反算（与 fund_service 盘中 rt['amount'] 万元量纲一致）。
-                    k_amount_wan = (k_volume * k_close / 100.0) if (k_volume and k_close > 0) else 0.0
-                    if k_close <= 0:
-                        continue
-                    if k_date > today_str:
-                        # 未来日期：防御性跳过（腾讯 K 线不应返回未来）
-                        continue
-                    if k_date == today_str:
-                        # [FIX 2026-07-31] 仅"盘中(15:10 前)"跳过当天快照价；
-                        # 收盘后(>=15:10)应写入当天正式收盘价。
-                        # 原逻辑 k_date >= today_str 一刀切，导致当天收盘价
-                        # 永远延迟到次日才入库（主看板"现价"显示成昨天的）。
-                        _now = datetime.now()
-                        if _now.hour < 15 or (_now.hour == 15 and _now.minute < 10):
-                            continue
-                    # [AI-2026-08-04] 最新日优先用 qt 收盘(更高精度)覆盖 K 线被截断的 close
-                    close_to_write = k_close
-                    if k_date == today_str and qt_close and qt_close > 0 and abs(qt_close - k_close) < 0.05:
-                        k_dec = len(str(k_close).split('.')[-1]) if '.' in str(k_close) else 0
-                        q_dec = len(str(qt_close).split('.')[-1]) if '.' in str(qt_close) else 0
-                        if q_dec > k_dec:
-                            close_to_write = qt_close
-                    # 收盘后 / 历史日期：正常写入官方收盘价
-                    self._safe_save_fund_data(date_str=k_date, fund_code=code, price=close_to_write, trade_volume=k_volume, volume=k_amount_wan)
-                    written += 1
-
-                if written > 0:
-                    self.db.mark_access_synced(today_str, source=f'lof_price_{code}')
-                    self.logger.info(f"✅ [{code}] 写入 {written} 天官方收盘价")
+                if items is None:
+                    k_status = 'no_data'
+            if k_status == 'no_data':
+                # [AI-2026-08-03] 首次探测到无K线：写入跳过名单，避免后续每次启动刷 WARNING
+                if code not in no_kline:
+                    no_kline[code] = "腾讯/新浪均无日K线(债券/封闭LOF)"
+                    _save_no_kline_denylist(no_kline)
+                    self.logger.warning(f"⚠️ [{code}] K线无数据（已加入跳过名单，后续不再报错）")
                 else:
-                    self.logger.info(f"⏭️ [{code}] 无新历史收盘价需写入（今日盘中跳过）")
+                    self.logger.debug(f"⏭️ [{code}] K线无数据（已在跳过名单）")
+                continue
+            # k_status == 'ok'（腾讯）或新浪兜底成功
+            written = 0
+            for it in items:
+                # 腾讯day格式: [date, open, close, high, low, volume(手), amount?]
+                k_date = str(it[0])
+                k_close = float(it[2]) if len(it) > 2 and it[2] else 0
+                # [2026-07-30] 成交量(手)：1 手 = 100 份；换手率 = 成交量(手) / 份额(万) × 100，与 woody 网页对齐
+                k_volume = float(it[5]) if len(it) > 5 and it[5] else 0
+                # [FIX 2026-09-11] 成交额(万元) = 成交量(手)×100×收盘 / 10000 = k_volume×k_close/100。
+                # 腾讯 qfq 日K线无独立成交额字段，由成交量×收盘反算（与 fund_service 盘中 rt['amount'] 万元量纲一致）。
+                k_amount_wan = (k_volume * k_close / 100.0) if (k_volume and k_close > 0) else 0.0
+                if k_close <= 0:
+                    continue
+                if k_date > today_str:
+                    # 未来日期：防御性跳过（腾讯 K 线不应返回未来）
+                    continue
+                if k_date == today_str:
+                    # [FIX 2026-07-31] 仅"盘中(15:10 前)"跳过当天快照价；
+                    # 收盘后(>=15:10)应写入当天正式收盘价。
+                    _now = datetime.now()
+                    if _now.hour < 15 or (_now.hour == 15 and _now.minute < 10):
+                        continue
+                # [AI-2026-08-04] 最新日优先用 qt 收盘(更高精度)覆盖 K 线被截断的 close（仅腾讯源有 qt 节点）
+                close_to_write = k_close
+                if k_date == today_str and qt_close and qt_close > 0 and abs(qt_close - k_close) < 0.05:
+                    k_dec = len(str(k_close).split('.')[-1]) if '.' in str(k_close) else 0
+                    q_dec = len(str(qt_close).split('.')[-1]) if '.' in str(qt_close) else 0
+                    if q_dec > k_dec:
+                        close_to_write = qt_close
+                # 收盘后 / 历史日期：正常写入官方收盘价
+                self._safe_save_fund_data(date_str=k_date, fund_code=code, price=close_to_write, trade_volume=k_volume, volume=k_amount_wan)
+                written += 1
 
-            except Exception as e:
-                self.logger.error(f"❌ [{code}] 腾讯K线获取收盘价失败: {e}")
+            if written > 0:
+                self.db.mark_access_synced(today_str, source=f'lof_price_{code}')
+                self.logger.info(f"✅ [{code}] 写入 {written} 天官方收盘价")
+            else:
+                self.logger.info(f"⏭️ [{code}] 无新历史收盘价需写入（今日盘中跳过）")
 
     def step4_fetch_lof_market(self):
         """[AI-2026-06-28] 步骤四：仅获取净值（收盘价已分离到 _step4_fetch_prices）"""
@@ -1027,7 +1081,6 @@ class DailyUpdater(BaseApp):
             if not os.path.exists(tool):
                 self.logger.warning(f"⚠️ 未找到导入工具 {tool}，跳过申赎状态同步")
                 return
-            # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；root再上一层到项目根父目录
             tmp = os.path.join(os.path.dirname(root), "database", "_ps_tmp.json")
             cmd = [sys.executable, tool, "pull",
                    "--host", ap.VPS_HOST, "--port", str(ap.VPS_PORT),
@@ -1587,15 +1640,36 @@ class DailyUpdater(BaseApp):
     @staticmethod
     def _import_share_fetcher():
         """复用 ETFarb 的份额直采模块（单一真源，避免两份代码漂移）。
-    
-        候选路径：本机 `D:\\Study\\ETFarb\\core` / ARM `/home/ubuntu/etfarb/core`。
-        找到即注入 sys.path 并 import `share_direct_fetcher`（含 `collect()`）。
+
+        候选路径（按序探测，存在的才注入 sys.path）：
+          · `ARB/ETFarb/src/core`  —— 现行布局（ETFarb 已迁入 src/，2026-10-07 起）
+          · `ARB/ETFarb/core`      —— 2026-10 前的旧布局，兼容保留
+          · ARM `/home/ubuntu/etfarb/src/core`、`/home/ubuntu/etfarb/core`
+        亦可用环境变量 ETFARB_CORE 直接指定。
+        找到即 import `share_direct_fetcher`（含 `collect()`）。
         """
-        candidates = [r"D:\Study\ETFarb\core", "/home/ubuntu/etfarb/core"]
+        _here = os.path.dirname(os.path.abspath(__file__))
+        # 标准 clone 布局：ETFarb 与 LOFarb 同级（均在 ARB/ 下）
+        # _here = <ARB>/LOFarb/src/ArbDashboard/backend/scheduler ⇒ 上溯 5 层 = <ARB>
+        _arb = os.path.normpath(os.path.join(_here, "..", "..", "..", "..", ".."))
+        candidates = [
+            os.environ.get("ETFARB_CORE", ""),
+            os.path.join(_arb, "ETFarb", "src", "core"),   # [AI-2026-10-07] 现行布局
+            os.path.join(_arb, "ETFarb", "core"),          # 旧布局兼容
+            "/home/ubuntu/etfarb/src/core",                # ARM（Linux 区分大小写，显式小写）
+            "/home/ubuntu/etfarb/core",
+        ]
+        candidates = [c for c in candidates if c]
         for d in candidates:
             if os.path.isdir(d) and d not in sys.path:
                 sys.path.insert(0, d)
-        import share_direct_fetcher as S
+        try:
+            import share_direct_fetcher as S
+        except ImportError as e:
+            # [AI-2026-10-07] 报出已尝试路径，避免下次再盲找
+            raise ImportError(
+                f"{e}（已尝试候选路径: {candidates}；可用环境变量 ETFARB_CORE 指定）"
+            ) from e
         return S
 
     def _step10_calculate_static_valuation(self):
@@ -1637,9 +1711,10 @@ class DailyUpdater(BaseApp):
         import sqlite3
         self.logger.info("=== 步骤十一：跟踪指数公式静态估值 (QDII亚洲/国内LOF/指数LOF) ===")
 
-        # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；5层dirname到项目根父目录(arbTest)
-        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))))), "database", "arb_master.db")
+        # [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
+        # [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
+        from arbcore.database.db_manager import _resolve_db_path
+        db_path = _resolve_db_path()
         conn = sqlite3.connect(db_path, timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
         cursor = conn.cursor()
@@ -1814,21 +1889,17 @@ class DailyUpdater(BaseApp):
                     # 汇率比率（用 _lookup_date 对齐指数基准日）
                     fx_ratio = 1.0
                     if fx_type != 'none':
-                        if fx_type == 'usd':
-                            cursor.execute("SELECT usd_cny_mid FROM exchange_rate WHERE date = ?", (date,))
-                            curr_fx = cursor.fetchone()
-                            cursor.execute("SELECT usd_cny_mid FROM exchange_rate WHERE date = ?", (_lookup_date,))
-                            prev_fx = cursor.fetchone()
-                        elif fx_type == 'jpy':
-                            cursor.execute("SELECT jpy_cny_mid FROM exchange_rate WHERE date = ?", (date,))
-                            curr_fx = cursor.fetchone()
-                            cursor.execute("SELECT jpy_cny_mid FROM exchange_rate WHERE date = ?", (_lookup_date,))
-                            prev_fx = cursor.fetchone()
-                        else:  # hkd
-                            cursor.execute("SELECT hkd_cny_mid FROM exchange_rate WHERE date = ?", (date,))
-                            curr_fx = cursor.fetchone()
-                            cursor.execute("SELECT hkd_cny_mid FROM exchange_rate WHERE date = ?", (_lookup_date,))
-                            prev_fx = cursor.fetchone()
+                        # [AI-2026-10-07 东哥抓错] 德/法基金（513030/159561/513080）虽归 QDII欧美 批次(usd)，
+                        #   但计价货币是欧元 —— fx_ratio 必须用 eur_cny_mid，否则用美元会让静态估值系统性偏离
+                        #   （实测 159561 09-24：用美元算出 +0.37% 误差、改用欧元后 ~-0.03%，与 woody 的 0% 一致）。
+                        #   口径与 common.py resolve_fx、dynamic_valuation.py 完全对称。缺失 eur 时 continue（宁缺毋假）。
+                        _fx_col = {'usd': 'usd_cny_mid', 'jpy': 'jpy_cny_mid', 'hkd': 'hkd_cny_mid'}.get(fx_type, 'usd_cny_mid')
+                        if fx_type == 'usd' and fund_code in EUR_FUND_CODES:
+                            _fx_col = 'eur_cny_mid'
+                        cursor.execute(f"SELECT {_fx_col} FROM exchange_rate WHERE date = ?", (date,))
+                        curr_fx = cursor.fetchone()
+                        cursor.execute(f"SELECT {_fx_col} FROM exchange_rate WHERE date = ?", (_lookup_date,))
+                        prev_fx = cursor.fetchone()
 
                         curr_val = curr_fx[0] if curr_fx and curr_fx[0] else None
                         prev_val = prev_fx[0] if prev_fx and prev_fx[0] else None
@@ -1908,9 +1979,10 @@ class DailyUpdater(BaseApp):
         import sqlite3
         self.logger.info("=== 步骤十二：白银期货官方估值 (历史表 static_val 列) ===")
 
-        # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；5层dirname到项目根父目录(arbTest)
-        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))))), "database", "arb_master.db")
+        # [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
+        # [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
+        from arbcore.database.db_manager import _resolve_db_path
+        db_path = _resolve_db_path()
         conn = sqlite3.connect(db_path, timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
         cursor = conn.cursor()

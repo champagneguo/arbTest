@@ -31,9 +31,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# realtime_freeze.py 位于 ArbDashboard/backend/services/ → 上溯 3 级到项目根 arbTest/
+# realtime_freeze.py 位于 src/ArbDashboard/backend/services/ → 上溯 3 级到 src（仓库根）
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；项目根父目录/database
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
 FREEZE_PATH = os.path.join(os.path.dirname(PROJECT_ROOT), 'database', 'rt_freeze.json')
 RT_CACHE_PATH = os.path.join(os.path.dirname(PROJECT_ROOT), 'database', 'rt_cache.json')

@@ -205,6 +205,8 @@ class DataFetcher:
                             res_rates['hkd'] = float(rate)
                         elif '日元' in currency_name or 'JPY' in currency_name or '日圆' in currency_name:
                             res_rates['jpy'] = float(rate)
+                        elif '欧元' in currency_name or 'EUR' in currency_name:
+                            res_rates['eur'] = float(rate)
 
                 if 'usd' in res_rates:
                     logger.info(f"国家外汇管理局 - USD: {res_rates.get('usd')}, HKD: {res_rates.get('hkd')}, JPY: {res_rates.get('jpy')}")
@@ -222,6 +224,7 @@ class DataFetcher:
                         'usd_cny_mid': res_rates.get('usd'),
                         'hkd_cny_mid': res_rates.get('hkd'),
                         'jpy_cny_mid': res_rates.get('jpy'),
+                        'eur_cny_mid': res_rates.get('eur'),
                         '来源': '国家外汇管理局'
                     }
 
@@ -545,6 +548,45 @@ class DataFetcher:
             logger.error(f"API接口获取 JPY/CNY 在岸价失败，状态码: {response.status_code}")
         except Exception as e:
             logger.error(f"获取 JPY/CNY 在岸价失败: {e}")
+        return None
+
+    def fetch_eur_cny_spot_rate(self):
+        """从新浪财经获取 EUR/CNY 欧元在岸价实时汇率（仅新浪 fx_seurcny）
+
+        用途：ETF 实时估值的 fx_base 历史在岸价（QDII欧洲 德/法 ETF）。
+        注意：此函数只取新浪在岸价，不取官方中间价（中间价用于静态估值）。
+        欧元中间价(7.488 量级)已是每1欧元兑人民币，无需像 JPY 那样 ×100。
+        由 daily_updater step3 在收盘流水线调用并落库为历史。
+
+        Returns:
+            dict { '日期', '时间', 'eur_cny_spot', '来源' } 或 None
+        """
+        logger.info("从新浪财经获取 EUR/CNY 欧元在岸价（spot）")
+        try:
+            _throttle_sina()
+            url = "https://hq.sinajs.cn/list=fx_seurcny"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://finance.sina.com.cn/"
+            }
+            response = requests.get(url, headers=headers, timeout=15, verify=False, proxies={"http": None, "https": None})
+            response.encoding = 'gbk'
+            if response.status_code == 200 and 'hq_str_fx_seurcny' in response.text:
+                values = response.text.split('"')[1].split(',')
+                if len(values) >= 18:
+                    update_time = values[0]
+                    spot_rate = float(values[1])   # 每1欧元兑人民币（与 eur_cny_mid 同口径，无需×100）
+                    date = values[17]
+                    logger.debug(f"EUR/CNY 在岸价: {spot_rate} (时间: {update_time})")
+                    return {
+                        '日期': date,
+                        '时间': update_time,
+                        'eur_cny_spot': spot_rate,
+                        '来源': '新浪财经 fx_seurcny'
+                    }
+            logger.error(f"API接口获取 EUR/CNY 在岸价失败，状态码: {response.status_code}")
+        except Exception as e:
+            logger.error(f"获取 EUR/CNY 在岸价失败: {e}")
         return None
 
     def fetch_lof_nav_data(self, fund_code, existing_data=None):
@@ -957,7 +999,7 @@ class DataFetcher:
         """从腾讯港股API获取港股历史数据"""
         logger.info(f"从腾讯获取港股历史数据: {symbol}")
 
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param=hk{symbol},day,,,320,qfq&r=0.1"
+        url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param=hk{symbol},day,,,320,qfq&r=0.1"
 
         try:
             response = requests.get(url, timeout=15, verify=False, proxies={"http": None, "https": None})
@@ -1010,9 +1052,31 @@ class DataFetcher:
             else:
                 logger.error(f"请求港股 {symbol} 历史数据失败，状态码: {response.status_code}")
         except Exception as e:
-            logger.error(f"获取港股 {symbol} 历史数据失败: {e}")
-
-        return None
+            logger.warning(f"腾讯港股 {symbol} 失败({e})，试东财兜底")
+            try:
+                em_secid = f"116.{symbol}" if (len(symbol) == 5 and symbol.isdigit()) else f"100.{symbol}"
+                em_url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={em_secid}"
+                          f"&ut=fa5fd1947f08e6d3cb8d1e3a8a3c7b2e&fields1=f1f1f2&fields2=f51f52f53f54f55f56"
+                          f"&klt=101&fqt=0&end=20500101&lmt=320")
+                em = requests.get(em_url, timeout=15, proxies={"http": None, "https": None}).json()
+                kl = (em.get("data") or {}).get("klines") or []
+                rows = []
+                for row in kl:
+                    p = row.split(",")
+                    # 东财格式 [date,open,close,high,low,volume] -> 腾讯港股 [date,open,high,low,close,volume]
+                    if len(p) >= 6 and p[0] and p[2]:
+                        rows.append([p[0], p[1], p[3], p[4], p[2], p[5]])
+                if rows:
+                    df = pd.DataFrame(rows, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.sort_values('date')
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    logger.info(f"东财兜底获取港股 {symbol} 历史数据，共 {len(df)} 条")
+                    return df
+            except Exception as e2:
+                logger.error(f"东财港股 {symbol} 也失败: {e2}")
+            return None
 
 
 # 创建全局实例

@@ -127,25 +127,56 @@ class SinaHistoricalFetcher(BaseHistoricalFetcher):
             return pd.DataFrame()
 
     def _fetch_hk_share(self, symbol: str, start_date, end_date) -> pd.DataFrame:
-        # 借用腾讯接口
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param=hk{symbol},day,,,100,qfq&r=0.1"
+        # [BUG-2026-10-06-05] 腾讯港股 K 线被 WAF 拦截；新浪港股日K线接口已废弃，
+        # 东财免费端仅返回日期无 OHLC。兜底尝试东财，失败则空（依赖 ARM sampler）。
         try:
+            url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param=hk{symbol},day,,,100,qfq&r=0.1"
             res = requests.get(url, timeout=10, proxies={"http": None, "https": None})
             text = res.text.split('kline_dayqfq=')[-1]
             data = json.loads(text)
             day_data = data.get('data', {}).get(f'hk{symbol}', {}).get('day', [])
-            df = pd.DataFrame(day_data).iloc[:, [0, 4]]
-            df.columns = ['date', 'close']
+            if day_data:
+                df = pd.DataFrame(day_data).iloc[:, [0, 4]]
+                df.columns = ['date', 'close']
+                df['date'] = pd.to_datetime(df['date'])
+                df['close'] = pd.to_numeric(df['close'])
+                if start_date:
+                    df = df[df['date'] >= pd.to_datetime(start_date)]
+                if end_date:
+                    df = df[df['date'] <= pd.to_datetime(end_date)]
+                return df.sort_values('date', ascending=False)
+            raise RuntimeError("腾讯港股无数据")
+        except Exception as e:
+            logger.warning(f"腾讯港股 {symbol} 失败({e})，试东财兜底")
+            return self._fetch_hk_via_eastmoney(symbol, start_date, end_date)
+
+    def _fetch_hk_via_eastmoney(self, symbol: str, start_date, end_date) -> pd.DataFrame:
+        """[BUG-2026-10-06-05] 东财港股兜底（免费端仅返回日期，通常空，依赖 ARM）。"""
+        try:
+            secid = f"116.{symbol}" if (len(symbol) == 5 and symbol.isdigit()) else f"100.{symbol}"
+            url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
+                   f"&ut=fa5fd1947f08e6d3cb8d1e3a8a3c7b2e&fields1=f1f1f2&fields2=f51f52f53f54f55f56"
+                   f"&klt=101&fqt=0&end=20500101&lmt=100")
+            res = requests.get(url, timeout=10, proxies={"http": None, "https": None})
+            em = res.json()
+            kl = (em.get("data") or {}).get("klines") or []
+            rows = []
+            for row in kl:
+                parts = row.split(",")
+                if len(parts) >= 3 and parts[0] and parts[2]:
+                    rows.append([parts[0], parts[2]])
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame(rows, columns=['date', 'close'])
             df['date'] = pd.to_datetime(df['date'])
             df['close'] = pd.to_numeric(df['close'])
-            
             if start_date:
                 df = df[df['date'] >= pd.to_datetime(start_date)]
             if end_date:
                 df = df[df['date'] <= pd.to_datetime(end_date)]
-                
             return df.sort_values('date', ascending=False)
-        except:
+        except Exception as e:
+            logger.error(f"东财港股 {symbol} 也失败: {e}")
             return pd.DataFrame()
 
     def _fetch_us_share(self, symbol: str, start_date, end_date) -> pd.DataFrame:

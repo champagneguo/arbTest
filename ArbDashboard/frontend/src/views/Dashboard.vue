@@ -3,7 +3,7 @@
     <n-grid :cols="24" :x-gap="10" :y-gap="10">
       <!-- 时钟+汇率（引擎状态已移到侧边栏） -->
       <n-gi :span="8">
-        <n-card size="small" :bordered="false" class="stat-card">
+        <n-card size="small" :bordered="false" class="stat-card" content-style="padding: 4px 10px;">
           <div style="display: flex; flex-direction: column; gap: 2px; padding: 2px 0;">
             <div style="display: flex; align-items: baseline; gap: 12px; white-space: nowrap;">
               <span style="font-weight: 600; font-size: 14px;">{{ currentDate }} <span class="time">{{ currentTime }}</span></span>
@@ -23,30 +23,32 @@
         </n-card>
       </n-gi>
 
-      <!-- 系统里程碑日志 -->
+      <!-- [AI-2026-10-06] 环球市场概览条（自有实现）：商品+期货，只显示最新价+涨跌幅，无"收盘/行情/行情时间"冗余 -->
+      <!-- [AI-2026-10-06 二轮] 日志卡移至侧栏（东哥定调），概览条扩为全宽 16；过期指示器/手动刷新随迁到本卡 -->
       <n-gi :span="16">
-        <n-card size="small" :bordered="false" class="stat-card log-card" content-style="padding: 0; position: relative;">
-          <n-button quaternary circle size="tiny" @click="fetchData" style="position: absolute; right: 4px; top: 4px; z-index: 10;">
-            <template #icon><n-icon><Zap /></n-icon></template>
-          </n-button>
-          <!-- 过期/计算状态指示器 -->
+        <n-card size="small" :bordered="false" class="stat-card ov-card" content-style="padding: 4px 10px; position: relative;">
+          <!-- [AI-2026-10-06 五轮] 手动刷新按钮删除：数据本就自动轮询，按钮冗余（东哥确认"死的"） -->
           <div v-if="dashboardMeta.stale || dashboardMeta.error" style="position: absolute; left: 8px; top: 4px; z-index: 10;">
             <n-tag type="warning" size="tiny" round>
               {{ dashboardMeta.error ? '数据异常' : (tableData.length === 0 ? '估值计算中…' : '数据已延迟') }}
               <template v-if="dashboardMeta.compute_ms > 0"> ({{ dashboardMeta.compute_ms }}ms)</template>
             </n-tag>
           </div>
-          <div class="milestone-scroll-box" style="padding-top: 4px; height: 100%;">
-             <div class="milestone-grid">
-                <div v-for="(m, i) in milestones" :key="i" class="milestone-cell">
-                   <span class="m-time">{{ m.time }}</span>
-                   <span class="m-msg" :class="(m.level || 'info').toLowerCase()">{{ m.message }}</span>
+          <div v-if="overviewGroups.length" class="ov-strip">
+            <div v-for="g in overviewGroups" :key="g.key" class="ov-group">
+              <span class="ov-glabel">{{ g.label }}</span>
+              <div class="ov-items">
+                <div v-for="it in g.items" :key="it.symbol" class="ov-item">
+                  <span class="ov-name">{{ it.name }}</span>
+                  <span class="ov-price">{{ it.price.toFixed(2) }}</span>
+                  <span class="ov-pct" :class="it.change_pct >= 0 ? 'ov-up' : 'ov-down'">
+                    {{ it.change_pct >= 0 ? '+' : '' }}{{ it.change_pct.toFixed(2) }}%
+                  </span>
                 </div>
-             </div>
-             <div v-if="milestones.length === 0" class="text-center text-gray-400 py-4" style="font-size: 10px;">
-                等待系统汇报...
-             </div>
+              </div>
+            </div>
           </div>
+          <div v-else class="ov-loading">{{ overviewError ? '行情通道未就绪（自动重试中）' : '行情加载中…' }}</div>
         </n-card>
       </n-gi>
 
@@ -77,45 +79,8 @@
       </n-gi>
     </n-grid>
 
-    <!-- 历史对账详情弹窗（2026-07-30：近全屏 + 单一滚动容器方案，根治横向滚动条被推到表底的问题） -->
-    <n-modal v-model:show="showHistoryModal" preset="card" :title="`[历史记录] ${selectedFund?.fund_code} - ${selectedFund?.fund_name}`" style="width: 96vw; max-width: 96vw; height: 90vh;">
-      <div class="history-modal-body">
-        <div v-if="selectedFund && !isCashManagementFund" class="history-info">
-          <div><strong>仓位：</strong> {{ fundHistoryPositionDisplay }}</div>
-          <div>
-            <strong>跟踪标的：</strong> 
-            {{ selectedFund?.category === '白银' ? '上期所白银期货AG0' : getIdxDisplayName(selectedFund) }}
-          </div>
-          <div><strong>申购费率：</strong> {{ selectedFund.purchase_fee || '-' }}</div>
-          <div><strong>赎回费率：</strong> {{ selectedFund.redemption_fee || '-' }}</div>
-        </div>
-        <div class="history-actions" style="margin: 6px 0 10px 0; display: flex; align-items: center; gap: 10px;">
-          <n-button size="small" type="primary" :loading="reconciling" @click="reconcileStaticValHandler">核对静态估值（补采近10日+重算）</n-button>
-          <span style="font-size: 12px; color: #64748b;">补采该基金历史价格/净值，并级联补底层ETF日价后重算静态估值</span>
-        </div>
-        <div class="history-table-wrapper">
-          <n-data-table
-            :columns="historyColumns"
-            :data="pagedHistory"
-            size="small"
-            bordered
-            style="width: 100%;"
-          />
-        </div>
-        <div class="history-pagination">
-          <n-pagination
-            v-model:page="historyPage"
-            :page-size="historyPageSize"
-            :item-count="fundHistory.length"
-            :page-slot="7"
-            show-size-picker
-            :page-sizes="[10, 15, 20, 30]"
-            size="small"
-          />
-          <span class="history-page-info">共 {{ fundHistory.length }} 条 · 每页 {{ historyPageSize }} 条</span>
-        </div>
-      </div>
-    </n-modal>
+    <!-- [AI-2026-10-07] 历史记录弹窗抽为共享组件 FundHistoryModal：主看板与实时估值页（TradeWorkbench）共用 -->
+    <FundHistoryModal v-model:show="showHistoryModal" :fund-code="selectedFund?.fund_code || ''" :fund="selectedFund" />
 
     <!-- 白银比价弹窗 -->
     <n-modal v-model:show="showSilverRatioModal" preset="card" title="白银比价监控 (161226)" style="width: 90%; max-width: 1200px;">
@@ -130,19 +95,19 @@ import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import {
   NGrid, NGi, NCard, NIcon, NText, NInput,
-  NButton, NDataTable, NTag, NTabs, NTabPane, NModal, NPagination, useMessage
+  NButton, NDataTable, NTag, NTabs, NTabPane, useMessage
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { Zap, Star, StarOff, History } from 'lucide-vue-next'
+import { Star, StarOff, History } from 'lucide-vue-next'
 
 // --- 新架构导入 ---
 import { useFundStore, useMarketStore, useAppStore } from '../store'
 import { formatPrice, formatValuation, formatPercent, formatPremium,
          formatVolume, formatShares, formatSharesChange, formatTurnoverRate,
          formatIndexPrice, priceColor, shortDate, cleanFundName } from '../utils'
-import { getFundHistory, reconcileStaticVal } from '../api'
 import { getFundHoldingRealtime } from '../api/fundApi'
 import SilverRatio from './SilverRatio.vue'
+import FundHistoryModal from '../components/FundHistoryModal.vue'
 
 const router = useRouter()
 
@@ -188,24 +153,44 @@ let oilPollTimer: any = null
 // ===== 从 Store 解构响应式状态（保持与模板同名的变量，避免改模板） =====
 const { tableData, loading, currentTab, searchKeyword, watchlist,
         filteredTableData, fundHistory, dashboardMeta, dashboardTabs } = storeToRefs(fundStore)
-const { milestones } = storeToRefs(appStore)
+
+// [AI-2026-10-06 二轮] 里程碑日志整体移至侧栏（MainLayout），Dashboard 不再渲染；
+// milestones 由 fetchData 里的 appStore.fetchSystemStatus() 持续刷新，侧栏直接读 store。
+// [AI-2026-10-06] 环球市场概览：商品(黄金/白银/WTI) + 期货(标普500/纳斯达克100/日经225)
+// 后端 /api/market/global-overview 带 60s 缓存，随 fetchData 轮询即可
+const overviewItems = ref<any[]>([])
+const overviewError = ref(false)
+const overviewGroups = computed(() => [
+  { key: 'commodity', label: '商品', items: overviewItems.value.filter((x: any) => x.group === 'commodity') },
+  { key: 'futures', label: '期货', items: overviewItems.value.filter((x: any) => x.group === 'futures') },
+].filter(g => g.items.length > 0))
+
+const fetchGlobalOverview = async () => {
+  try {
+    const res = await fetch('/api/market/global-overview')
+    const data = await res.json()
+    if (data.status === 'ok' && Array.isArray(data.data) && data.data.length) {
+      overviewItems.value = data.data
+      overviewError.value = false
+    } else {
+      // 后端正常但抓取为空（如数据源故障）：标记失败态，提示"自动重试中"而非永久"加载中"
+      overviewError.value = true
+    }
+  } catch (e) {
+    console.error('获取环球市场概览失败', e)
+    overviewError.value = true
+  }
+}
 
 // ===== 本地状态（无需进 Store） =====
 const showHistoryModal = ref(false)
 const showSilverRatioModal = ref(false)
 const selectedFund = ref<any>(null)
-// [2026-07-30] 历史弹窗分页：每页 10 个交易日，彻底消除长表纵向滚动把横向滚动条推到表底的问题
-const historyPage = ref(1)
-const historyPageSize = 10
-const pagedHistory = computed(() => {
-  const all = fundHistory.value || []
-  const start = (historyPage.value - 1) * historyPageSize
-  return all.slice(start, start + historyPageSize)
-})
-watch(fundHistory, () => { historyPage.value = 1 })
 const isCashManagementFund = computed(() => {
   return ['511880', '511360', '511520'].includes(selectedFund.value?.fund_code)
 })
+// [AI-2026-10-07] 历史记录弹窗（视图/分页/持仓明细/误差表/汇率行等）已抽为共享组件 FundHistoryModal
+
 let refreshTimer: any = null
 
 // ===== Watch 自选持久化 =====
@@ -214,34 +199,10 @@ watch(watchlist, (newVal) => {
 }, { deep: true })
 
 // ===== 方法 =====
-const openHistory = async (fund: any) => {
+// [AI-2026-10-07] 拉取 fundHistory 移入 FundHistoryModal（watch show 触发），此处只选中行并开弹窗
+const openHistory = (fund: any) => {
   selectedFund.value = fund
   showHistoryModal.value = true
-  await fundStore.fetchFundHistory(fund.fund_code)
-}
-
-// [AI-2026-08-04] 单基金「核对静态估值」：替代已移除的全局重算。补采该基金近10日历史价格/净值
-// （级联底层ETF如VGT日价）并重算静态估值，仅影响当前基金。
-const reconciling = ref(false)
-const reconcileStaticValHandler = async () => {
-  if (!selectedFund.value?.fund_code) return
-  const code = selectedFund.value.fund_code
-  reconciling.value = true
-  try {
-    const res = await reconcileStaticVal(code, 10)
-    if (res.data?.status === 'ok') {
-      const s = res.data.data?.stats || {}
-      message.success(`「${code}」核对完成：价格${s.lof_price || 0}天 / 净值${s.lof_nav || 0}天 / 底层ETF${Object.keys(s.etf || {}).join(',') || '无'}已补采，静态估值已重算`)
-      await fundStore.fetchFundHistory(code)
-      historyPage.value = 1
-    } else {
-      message.error(`核对失败: ${res.data?.message || '未知错误'}`)
-    }
-  } catch (e: any) {
-    message.error(`核对失败: ${e?.message || e}`)
-  } finally {
-    reconciling.value = false
-  }
 }
 
 /**
@@ -272,11 +233,13 @@ const fetchData = async (isSilent = false) => {
   if (!isSilent && filteredTableData.value.length === 0) loading.value = true
   try {
     // [AI-2026-07-07] fetchRates 加入 fetchData，确保汇率随定时刷新自动更新（原来只在 onMounted 取一次）
+    // [AI-2026-10-06] fetchGlobalOverview 加入：环球市场概览随定时刷新更新（后端 60s 缓存）
     await Promise.all([
       fundStore.fetchDashboard(isSilent),
       marketStore.fetchOverview(),
       appStore.fetchSystemStatus(),
-      fetchRates()
+      fetchRates(),
+      fetchGlobalOverview()
     ])
   } catch (err) { console.error('获取数据失败', err) } finally { loading.value = false }
 }
@@ -372,18 +335,17 @@ const allColumns: DataTableColumns<any> = [
   },
   {
     title: '代码', key: 'fund_code', width: 65, fixed: 'left', align: 'center',
-    sorter: (a: any, b: any) => a.fund_code.localeCompare(b.fund_code),
     render(row: any) { return h(NText, { code: true, class: 'code-cell' }, { default: () => row.fund_code || '-' }) }
   },
   {
-    title: '名称', key: 'fund_name', width: 90, fixed: 'left', align: 'center', ellipsis: { tooltip: true },
+    title: '名称', key: 'fund_name', width: 130, fixed: 'left', align: 'center', ellipsis: { tooltip: true },
     className: 'col-fund-name',
     render(row: any) {
       const canAnalyze = HOLDING_ANALYSIS_FUNDS.includes(row.fund_code)
       return h('span', {
         class: 'fund-name-cell' + (canAnalyze ? ' clickable-cell' : ''),
         style: canAnalyze
-          ? { background: '#dcfce7', color: '#166534', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontWeight: '600' }
+          ? { background: 'var(--co-accent-soft)', color: 'var(--co-accent-text)', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontWeight: '600' }
           : { cursor: 'default' },
         onClick: canAnalyze
           ? () => { router.push({ path: '/holding-analysis', query: { code: row.fund_code, name: row.fund_name } }) }
@@ -394,15 +356,10 @@ const allColumns: DataTableColumns<any> = [
   },
   {
     title: '现价', key: 'price', width: 62, align: 'center',
-    sorter: (a: any, b: any) => curPrice(a) - curPrice(b),
     render(row: any) { return h('span', { class: 'num-cell' }, formatPrice(curPrice(row))) }
   },
   {
     title: '涨跌幅', key: 'price_change', width: 66, align: 'center',
-    sorter: (a: any, b: any) => {
-      const c = (r: any) => r.prev_close ? (curPrice(r) - r.prev_close) / r.prev_close * 100 : (r.price_change || 0)
-      return c(a) - c(b)
-    },
     render(row: any) {
       const chg = row.prev_close ? (curPrice(row) - row.prev_close) / row.prev_close * 100 : row.price_change
       if (chg === null || chg === undefined) return '-'
@@ -413,7 +370,7 @@ const allColumns: DataTableColumns<any> = [
   {
     title: () => h('div', { class: 'col-title-wrapper' }, [
       h('div', { style: 'font-size: 12px; font-weight: bold;' }, '实时估值'),
-      h('div', { style: 'font-size: 9px; color: #64748b; margin-top: 1px;' }, '点击进实盘(黄金原油/QDII欧美)')
+      h('div', { style: 'font-size: 9px; color: #64748b; margin-top: 1px;' }, '点击进实盘')
     ]),
     key: 'rt_val_display', width: 80, align: 'center',
     className: 'col-rt-val',
@@ -504,7 +461,6 @@ const allColumns: DataTableColumns<any> = [
   },
   {
     title: 'T-1估值溢价', key: 'static_premium', width: 92, align: 'center',
-    sorter: (a: any, b: any) => (a.static_premium || 0) - (b.static_premium || 0),
     render(row: any) {
       const top = !row.static_premium
         ? h('span', { class: 'num-cell compact' }, '-')
@@ -522,18 +478,15 @@ const allColumns: DataTableColumns<any> = [
     }
   },
   {
-    title: '成交额(万)', key: 'volume', width: 68, align: 'right',
-    sorter: (a: any, b: any) => (a.volume || 0) - (b.volume || 0),
+    title: () => twoLineTitle('成交额', '(万)'), key: 'volume', width: 68, align: 'right',
     render(row: any) { return h('span', { class: 'num-cell muted' }, formatVolume(row.volume)) }
   },
   {
-    title: '份额(万)', key: 'shares', width: 52, align: 'right',
-    sorter: (a: any, b: any) => (a.shares || 0) - (b.shares || 0),
+    title: () => twoLineTitle('份额', '(万)'), key: 'shares', width: 52, align: 'right',
     render(row: any) { return h('span', { class: 'num-cell muted' }, formatShares(row.shares)) }
   },
   {
-    title: '新增(万)', key: 'shares_added', width: 48, align: 'right',
-    sorter: (a: any, b: any) => (a.shares_added || 0) - (b.shares_added || 0),
+    title: () => twoLineTitle('新增', '(万)'), key: 'shares_added', width: 48, align: 'right',
     fixedHeader: true,
     render(row: any) {
       const added = row.shares_added || 0
@@ -618,7 +571,7 @@ const renderValWithChg = (val: number, chg: number, precision: number = 4) => {
     if (chg == null || chg === 0) {
         return h('span', { style: 'font-weight: 500;' }, valStr)
     }
-    const color = chg > 0 ? '#dc2626' : '#16a34a'
+    const color = chg > 0 ? 'var(--co-up)' : 'var(--co-down)'
     const chgStr = (chg > 0 ? '+' : '') + chg.toFixed(2) + '%'
     return h('span', {}, [
         h('span', { style: 'font-weight: 500;' }, valStr),
@@ -691,8 +644,8 @@ const historyColumns = computed<DataTableColumns<any>>(() => {
             render(row: any) {
                 const inc = dailyIncrements.value[row.date]
                 if (inc == null) return '-'
-                const color = inc >= 0 ? '#16a34a' : '#dc2626'
-                return h('span', { class: 'num-cell compact', style: { color } }, (inc >= 0 ? '+' : '') + inc.toFixed(4))
+                // 份额增减非涨跌语义，用中性深色（东哥10-07：仅跌幅可用绿）
+                return h('span', { class: 'num-cell compact', style: { color: 'var(--co-text)' } }, (inc >= 0 ? '+' : '') + inc.toFixed(4))
             }
         }] : []),
         { title: '收盘价', key: 'price', width: 95, align: 'center', render(row: any) { return renderValWithChg(row.price, row.price_chg, 3) } },
@@ -805,6 +758,13 @@ const fundHistoryPositionDisplay = computed(() => {
     return '-'
 })
 
+// [AI-2026-10-06 东哥需求] 表头两行显示：主名 + 小字灰色单位行（如 成交额/(万)），压列宽不折行挤爆
+const twoLineTitle = (main: string, sub: string) =>
+  h('div', { style: 'line-height: 1.25; text-align: center;' }, [
+    h('div', {}, main),
+    h('div', { style: 'font-size: 9px; color: #64748b; font-weight: 400;' }, sub),
+  ])
+
 const columns = computed<DataTableColumns<any>>(() => {
   // 深拷贝以便动态修改表头
   let cols = allColumns.map(c => ({...c}))
@@ -896,7 +856,8 @@ const tableScrollX = computed(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 12px;
+  /* [AI-2026-10-06 东哥需求] TAB排与表格间距压缩：padding 8→4，底边0（tab自身有高度） */
+  padding: 4px 12px 0;
   border-bottom: 1px solid #e5edf7;
   background: #ffffff;
 }
@@ -907,19 +868,25 @@ const tableScrollX = computed(() => {
   border-radius: 8px;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
   box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
-  height: 84px;
+  /* [AI-2026-10-06 五轮] 删旧布局固定 height:84px，卡片高度随内容自适应（压缩顶部留白，空间让给表格） */
 }
-.log-card { overflow: hidden; border: 1px solid #e5edf7; }
-.log-header { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid #eef3f9; }
-.milestone-scroll-box { height: 56px; overflow-y: scroll !important; padding: 4px 10px; }
-.milestone-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 12px; }
-.milestone-cell { display: flex; align-items: flex-start; gap: 6px; font-size: 10px; line-height: 1.4; }
-.milestone-item { font-size: 11px; margin-bottom: 4px; display: flex; align-items: flex-start; gap: 8px; line-height: 1.4; }
-.m-time { color: #8a98aa; flex-shrink: 0; font-family: "Fira Code", Consolas, monospace; }
-.m-msg { color: #425466; word-break: break-all; text-align: left; }
-.m-msg.error { color: #dc2626; font-weight: bold; }
-.m-msg.warning { color: #d97706; }
-.m-msg.success { color: #16a34a; font-weight: bold; }
+/* [AI-2026-10-06 二轮] 日志卡已移至侧栏（MainLayout），相关样式随之删除 */
+/* [AI-2026-10-06] 环球市场概览条：清淡风（涨红/跌绿统一走 --co-up/--co-down token） */
+.ov-card { overflow: hidden; border: 1px solid #e5edf7; }
+/* [AI-2026-10-06 四轮·东哥定调] 去掉嵌套底盒，商品/期货直接平铺在卡内（与左侧汇率卡同构），节约纵向空间 */
+.ov-strip {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ov-group { display: flex; align-items: center; gap: 10px; }
+.ov-glabel { font-size: 12px; color: #1e293b; width: 32px; flex-shrink: 0; font-weight: 800; }
+.ov-items { display: flex; flex: 1; justify-content: space-around; gap: 6px; }
+.ov-item { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.ov-name { font-size: 12px; color: #64748b; }
+.ov-price { font-size: 13px; font-weight: 700; color: #1e293b; font-variant-numeric: tabular-nums; }
+.ov-pct { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ov-up { color: var(--co-up); }
+.ov-down { color: var(--co-down); }
+.ov-loading { font-size: 10px; color: #94a3b8; }
 .stat-card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08); }
 .main-card {
   border-radius: 8px;
@@ -961,10 +928,15 @@ const tableScrollX = computed(() => {
 .bg-orange-light { background-color: #ffedd5; }
 .status-pill { font-size: 10px; padding-inline: 5px !important; }
 :deep(.n-tabs .n-tabs-tab) {
-  padding: 6px 10px;
+  /* [AI-2026-10-06 东哥需求] 压缩TAB行高：6px→3px→2px+13px字 */
+  padding: 2px 8px;
+  font-size: 13px;
   color: #526173;
   font-weight: 650;
 }
+/* [AI-2026-10-06 五轮] bar型tabs导航自带上下留白压掉，TAB行整体再矮一截 */
+:deep(.n-tabs .n-tabs-nav) { padding: 0; line-height: 1.3; }
+:deep(.n-tabs .n-tabs-tab__label) { line-height: 1.3; }
 :deep(.n-tabs .n-tabs-tab--active) { color: #2563eb !important; background-color: #eef6ff !important; border-radius: 6px 6px 0 0; }
 :deep(.n-tabs .n-tabs-bar) { background-color: #2563eb !important; }
 :deep(.n-data-table-th) {
@@ -1024,7 +996,8 @@ const tableScrollX = computed(() => {
 /* 表格外层容器：固定高度，同时处理水平和垂直滚动 */
 .table-scroll-wrapper {
   width: 100%;
-  height: calc(100vh - 220px);
+  /* [AI-2026-10-06 五轮] 顶部卡瘦身(84→~50)+TAB行压缩，220px→180px，省出高度全给表格 */
+  height: calc(100vh - 180px);
   overflow: auto;
 }
 
@@ -1038,22 +1011,16 @@ const tableScrollX = computed(() => {
   display: flex;
   flex-direction: column;
 }
-.history-modal-body {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  width: 100%;
-}
+/* [AI-2026-10-07] 历史弹窗样式（.history-modal-body / .hd-*）已随组件抽走 → FundHistoryModal.vue */
 .history-info {
   flex: 0 0 auto;
   margin-bottom: 16px;
   display: flex;
   gap: 24px;
-  font-size: 14px;
-  background: #f8fafc;
+  font-size: var(--co-fs-title);
+  background: var(--co-surface-2);
   padding: 12px;
-  border-radius: 8px;
+  border-radius: var(--co-radius);
 }
 .history-table-wrapper {
   flex: 1 1 auto;
@@ -1089,7 +1056,7 @@ const tableScrollX = computed(() => {
 .history-table-wrapper :deep(.n-data-table),
 .history-table-wrapper :deep(.n-data-table-td),
 .history-table-wrapper :deep(.n-data-table-th) {
-  font-family: Tahoma, "Microsoft YaHei", Arial, sans-serif !important;
+  font-family: var(--co-font-sans) !important;
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
 }
@@ -1104,7 +1071,7 @@ const tableScrollX = computed(() => {
   z-index: 2;
 }
 .history-table-wrapper :deep(.n-data-table-thead .n-data-table-th) {
-  background: #f8fafc;
+  background: var(--co-surface-2);
 }
 
 /* 分页栏：固定在表格下方，不随表格滚动 */
@@ -1118,32 +1085,32 @@ const tableScrollX = computed(() => {
   flex-wrap: wrap;
 }
 .history-page-info {
-  font-size: 13px;
-  color: #64748b;
+  font-size: var(--co-fs-base);
+  color: var(--co-text-3);
 }
 
-/* 名称列不再整列着色：仅白名单内原油基金由行内 style 显示绿色（见 allColumns 渲染），
+/* 名称列不再整列着色：仅白名单内原油基金由行内 style 显示淡蓝底 chip（见 allColumns 渲染），
    其余基金保持与其它列一致的无底色，避免误导"可点击"。 */
 :deep(.n-data-table-tr:nth-child(even) .n-data-table-td.col-rt-val),
 :deep(.n-data-table-tr:nth-child(odd) .n-data-table-td.col-rt-val) {
-  background-color: #f0f9ff !important;
+  background-color: var(--co-rt-bg) !important;
 }
 :deep(.n-data-table-tr:nth-child(even) .n-data-table-td.col-static-val),
 :deep(.n-data-table-tr:nth-child(odd) .n-data-table-td.col-static-val) {
-  background-color: #fff7ed !important;
+  background-color: var(--co-static-bg) !important;
 }
 :deep(.n-data-table-tr:nth-child(even) .n-data-table-td.col-si-val),
 :deep(.n-data-table-tr:nth-child(odd) .n-data-table-td.col-si-val) {
-  background-color: #f0fdf4 !important;
+  background-color: var(--co-si-bg) !important;
 }
 :deep(.n-data-table-th.col-rt-val) {
-  background-color: #e0f2fe !important;
+  background-color: var(--co-rt-head) !important;
 }
 :deep(.n-data-table-th.col-static-val) {
-  background-color: #ffedd5 !important;
+  background-color: var(--co-static-head) !important;
 }
 :deep(.n-data-table-th.col-si-val) {
-  background-color: #dcfce7 !important;
+  background-color: var(--co-si-head) !important;
 }
 
 /* [交换位置] 时钟 + 汇率样式 */
@@ -1155,8 +1122,8 @@ const tableScrollX = computed(() => {
 .rate-row { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; }
 .rate-value { font-size: 16px; font-weight: 800; color: #1e293b; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 .rate-change { font-size: 12px; font-weight: 700; }
-.rate-change.up { color: #ef4444; }
-.rate-change.down { color: #22c55e; }
+.rate-change.up { color: var(--co-up); }
+.rate-change.down { color: var(--co-down); }
 </style>
 
 <!-- [AI-2026-08-04] freeze-badge / frozen-cell 必须在 <style scoped> 外

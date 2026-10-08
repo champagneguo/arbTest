@@ -234,19 +234,25 @@ def fetch_yahoo_jp(code, n=N_DAYS_DEFAULT):
 
 # ---------- 行情源 ----------
 def fetch_tx(code, kind="us", n=N_DAYS_DEFAULT):
-    """腾讯日K。伦敦 ukXXX、港股 hkXXXX 可用；美股 usXXX 只给最近1天，不要用它取历史。"""
-    url = (
-        "https://web.ifzq.gtimg.cn/appstock/app/%sfqkline/get"
-        "?param=%s,day,,,%d,qfq" % (kind, code, n)
-    )
-    j = json.loads(_http_get(url, referer="https://gu.qq.com/"))
-    data = j.get("data", {}).get(code)
-    if not data:
+    """腾讯日K。伦敦 ukXXX、港股 hkXXXX 可用；美股 usXXX 只给最近1天，不要用它取历史。
+    [BUG-2026-10-06-05/+08] 腾讯曾因 web. 前端主机 WAF 失败；已改 ifzq.gtimg.cn 复活。
+    失败仍返回 {}（兜底保留）。"""
+    try:
+        url = (
+            "https://ifzq.gtimg.cn/appstock/app/%sfqkline/get"
+            "?param=%s,day,,,%d,qfq" % (kind, code, n)
+        )
+        j = json.loads(_http_get(url, referer="https://gu.qq.com/"))
+        data = j.get("data", {}).get(code)
+        if not data:
+            return {}
+        k = data.get("qfqday") or data.get("day")
+        if not k:
+            return {}
+        return {x[0]: float(x[2]) for x in k}  # [date, open, close, high, low, ...]
+    except Exception as e:
+        print(f"[usa_sampler] 腾讯 {code} 失败({e})，无免费兜底源")
         return {}
-    k = data.get("qfqday") or data.get("day")
-    if not k:
-        return {}
-    return {x[0]: float(x[2]) for x in k}  # [date, open, close, high, low, ...]
 
 
 def fetch_sina(sym, n=N_DAYS_DEFAULT):

@@ -231,15 +231,26 @@ funds:
     equity_ratio: 118.88
     cash_ratio: -18.88
   valuation_portfolio:
+  - symbol: IAU
+    weight: 23.253464
   - symbol: GLD
-    weight: 69.1
-    anchor: US
-  - symbol: XLE
-    weight: 44.78
-    anchor: US
-  - symbol: USO
-    weight: -13.88
-    anchor: US
+    weight: 15.444573
+  - symbol: DBB
+    weight: 14.766166
+  - symbol: UGL
+    weight: 14.463048
+  - symbol: DBA
+    weight: 7.794457
+  - symbol: XOP
+    weight: 7.245958
+  - symbol: ZSL
+    weight: 5.918014
+  - symbol: TMF
+    weight: 4.647806
+  - symbol: SCO
+    weight: 3.392032
+  - symbol: OIH
+    weight: 3.07448
   sina_index_url: ''
   holdings_portfolio: []
   future_hedging: []
@@ -270,15 +281,26 @@ funds:
     equity_ratio: 83.85
     cash_ratio: 16.15
   valuation_portfolio:
+  - symbol: COMT
+    weight: 23.093387
+  - symbol: PDBA
+    weight: 13.833502
+  - symbol: SGOL
+    weight: 13.101273
+  - symbol: CRUD.L
+    weight: 10.544103
+  - symbol: PDBC
+    weight: 10.16109
+  - symbol: BRNT.L
+    weight: 8.257294
+  - symbol: AAAU
+    weight: 6.8041
+  - symbol: IAU
+    weight: 6.071871
+  - symbol: BCD
+    weight: 5.395967
   - symbol: GLD
-    weight: 67.49
-    anchor: US
-  - symbol: ^USO-EU
-    weight: 23.43
-    anchor: EU
-  - symbol: USO
-    weight: 9.08
-    anchor: US
+    weight: 2.737411
   sina_index_url: ''
   holdings_portfolio: []
   future_hedging:
@@ -559,14 +581,9 @@ funds:
     name: ''
   valuation_portfolio:
   - symbol: GLD
-    weight: 94.92
-    anchor: US
-  - symbol: ^GLD-JP
-    weight: 3.51
-    anchor: JP
-  - symbol: ^GLD-EU
-    weight: 1.57
-    anchor: EU
+    weight: 89.793336
+  - symbol: GLD-EU
+    weight: 10.206664
   trade_etf: GLD
   trade_future: MGC
   position: 96.86
@@ -1107,12 +1124,22 @@ funds:
     equity_ratio: 94.04
     cash_ratio: 5.96
   valuation_portfolio:
+  - symbol: PSI
+    weight: 19.505141
   - symbol: SOXX
-    weight: 80.56
-    anchor: US
+    weight: 18.96958
+  - symbol: SMH
+    weight: 18.948158
+  - symbol: SOXQ
+    weight: 18.88389
+  - symbol: SZ159995
+    weight: 8.290488
+  - symbol: SH512760
+    weight: 8.226221
   - symbol: SZ159560
-    weight: 19.44
-    anchor: US
+    weight: 5.323479
+  - symbol: 2644.T
+    weight: 1.853042
   sina_index_url: ''
   holdings_portfolio: []
   future_hedging: []
@@ -1233,30 +1260,108 @@ funds:
 - code: '159561'
   name: 德国ETF嘉实
   category: QDII欧美
+  rate_type: spot
   data_source: woody
-  trade_etf: DAX
+  trade_etf: ''
   trade_future: ''
   holdings:
     equity_ratio: 100
   valuation_portfolio:
-  - symbol: DAX
-    weight: 100
-    anchor: US
+  - symbol: znb_DAX
+    weight: 100.0
   redemption_fee_rate: 0.5
   commission_rate: 0
-  valuation_method: etf
+  valuation_method: index
   static_valuation:
-    basis: etf_netvalue
+    basis: index
     symbol: DAX
     source_priority:
-    - eastmoney
+    - sina
     - yahoo
   dynamic_valuation:
-    basis: etf_realtime
+    basis: index
     symbol: DAX
     source_priority:
-    - IB
-    - FUTU
+    - sina
+- code: '513030'
+  name: 德国ETF华安
+  category: QDII欧美
+  rate_type: spot
+  data_source: woody
+  trade_etf: ''
+  trade_future: ''
+  holdings:
+    equity_ratio: 100
+  valuation_portfolio:
+  - symbol: znb_DAX
+    weight: 100.0
+  redemption_fee_rate: 0.5
+  commission_rate: 0
+  valuation_method: index
+  static_valuation:
+    basis: index
+    symbol: DAX
+    source_priority:
+    - sina
+    - yahoo
+  dynamic_valuation:
+    basis: index
+    symbol: DAX
+    source_priority:
+    - sina
+- code: '513080'
+  name: 法国ETF华安
+  category: QDII欧美
+  rate_type: spot
+  data_source: woody
+  trade_etf: ''
+  trade_future: ''
+  holdings:
+    equity_ratio: 100
+  valuation_portfolio:
+  - symbol: znb_CAC
+    weight: 100.0
+  redemption_fee_rate: 0.5
+  commission_rate: 0
+  valuation_method: index
+  static_valuation:
+    basis: index
+    symbol: CAC
+    source_priority:
+    - sina
+    - yahoo
+  dynamic_valuation:
+    basis: index
+    symbol: CAC
+    source_priority:
+    - sina
+- code: '513800'
+  name: 日本东证指数ETF南方
+  category: QDII日本
+  rate_type: spot
+  data_source: woody
+  trade_etf: ''
+  trade_future: ''
+  holdings:
+    equity_ratio: 100
+  valuation_portfolio:
+  - symbol: znb_TPX
+    weight: 100.0
+  redemption_fee_rate: 0.5
+  commission_rate: 0
+  valuation_method: index
+  static_valuation:
+    basis: index
+    symbol: TOPIX
+    source_priority:
+    - sina
+    - yahoo
+    - eastmoney
+  dynamic_valuation:
+    basis: index
+    symbol: TOPIX
+    source_priority:
+    - sina
 - code: '513000'
   name: 易方达日经225ETF
   category: QDII日本
@@ -1269,9 +1374,8 @@ funds:
   holdings:
     equity_ratio: 93
   valuation_portfolio:
-  - symbol: NKY
-    weight: 100
-    anchor: US
+  - symbol: znb_NKY
+    weight: 100.0
   redemption_fee_rate: 0.5
   commission_rate: 0
   valuation_method: index
@@ -1297,9 +1401,8 @@ funds:
   holdings:
     equity_ratio: 100
   valuation_portfolio:
-  - symbol: NKY
-    weight: 100
-    anchor: US
+  - symbol: znb_NKY
+    weight: 100.0
   redemption_fee_rate: 0.5
   commission_rate: 0
   valuation_method: index
@@ -1325,9 +1428,8 @@ funds:
   holdings:
     equity_ratio: 97
   valuation_portfolio:
-  - symbol: NKY
-    weight: 100
-    anchor: US
+  - symbol: znb_NKY
+    weight: 100.0
   redemption_fee_rate: 0.5
   commission_rate: 0
   valuation_method: index
@@ -1350,9 +1452,8 @@ funds:
   holdings:
     equity_ratio: 91
   valuation_portfolio:
-  - symbol: NKY
-    weight: 100
-    anchor: US
+  - symbol: znb_NKY
+    weight: 100.0
   redemption_fee_rate: 0.5
   commission_rate: 0
   valuation_method: index
@@ -1520,6 +1621,9 @@ symbol_sources:
   '127003': TDX
   '513100': TDX
   '513500': TDX
+  '513030': TDX
+  '513080': TDX
+  '513800': TDX
   '510900': TDX
   '159915': TDX
   '00700': FUTU
@@ -1672,7 +1776,9 @@ symbol_sources:
   '399987': TDX
   '00992': FUTU
   '399809': TDX
-  DAX: FUTU
+  DAX: SINA
+  CAC: SINA
+  TOPIX: SINA
   '930713': TDX
   CRUD.L: TDX
   H11136.CSI: TDX

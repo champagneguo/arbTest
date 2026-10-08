@@ -6,6 +6,10 @@ from typing import Dict, Any, List, Optional
 
 from arbcore.config.config_loader import load_config, get_config_path
 
+# [AI-2026-10-07] 欧元基金（德/法 QDII）：静态用中间价 eur_cny_mid，实时用在岸价 eur_cny_spot。
+# 与日元(jpy_cny_mid/jpy_cny_spot)口径完全对称。513800 东证属日本(TOPIX)走日元，不在列内。
+EUR_FUND_CODES = {'513030', '159561', '513080'}
+
 
 def load_fund_config(code: str) -> Dict[str, Any]:
     """从 lof_config.yaml 载入单只基金的完整配置 dict。私有配置优先（与 config_loader 一致）。"""
@@ -31,7 +35,9 @@ def resolve_fx(db, code: str, choice: str = 'auto', fund_config: Optional[Dict[s
     if choice == 'base':
         return None
     cat = (fund_config or {}).get('category', '')
-    base_col = 'jpy_cny_mid' if cat == 'QDII日本' else 'usd_cny_mid'
+    base_col = ('eur_cny_mid' if code in EUR_FUND_CODES
+                else 'jpy_cny_mid' if cat == 'QDII日本'
+                else 'usd_cny_mid')
     if choice == 'auto':
         col = base_col if is_lof(code) else base_col.replace('_mid', '_spot')
     elif choice == 'mid':

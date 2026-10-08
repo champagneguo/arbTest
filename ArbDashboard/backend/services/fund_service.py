@@ -4,6 +4,7 @@ import json
 import time
 import threading
 import functools
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pandas as pd
@@ -16,6 +17,7 @@ import yaml
 from arbcore.calculators.valuation_data_engine import resolve_method
 # [AI-2026-07-27] 统一估值核心（估值引擎+数据引擎分离）：QDII日本实时复用篮子公式，NK期货价作单组件
 from arbcore.calculators.unified_valuation import basket_valuation
+from arbcore.analysis.common import EUR_FUND_CODES
 # [2026-07-31] 收盘后冻结实时估值（15:00 快照覆盖 live 值）
 from services.realtime_freeze import apply_freeze_to_dashboard, update_rt_cache
 
@@ -87,6 +89,81 @@ def _scalar_level(v):
     if isinstance(v, (list, tuple)) and v:
         return float(v[0]) if v[0] is not None else 0
     return v
+
+
+# [AI-2026-10-07] 持仓标的中文名（实时估值页「标的」列代码+中文展示）。
+# 腾讯 qt.gtimg.cn 一次批量抓全部持仓名称（GBK），失败/无匹配 → 名称缺失，
+# 前端只显示代码（纯展示增强，绝不影响估值路径）。名称基本不变 → 模块级缓存。
+_HOLDING_NAME_CACHE: Dict[str, str] = {}
+_HOLDING_NAME_LOCK = threading.Lock()
+
+
+def _tencent_symbol_code(sym: str) -> Optional[str]:
+    """持仓 symbol → 腾讯 qt.gtimg 行情代码；无法映射（期货/境外指数等）返回 None。"""
+    s = (sym or '').strip().upper().lstrip('^')
+    for suf in ('-EU', '-JP', '-HK'):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+            break
+    if re.match(r'^\d{5}$', s):            # 港股 5 位
+        return 'hk' + s
+    if re.match(r'^\d{6}$', s):            # A股 6 位：沪 60/68/51/56/58，其余深
+        return ('sh' if s[:2] in ('60', '68', '51', '56', '58') else 'sz') + s
+    if len(s) > 2 and s[:2] in ('SH', 'SZ') and s[2:].isdigit():
+        return s[:2].lower() + s[2:]
+    if re.match(r'^[A-Z.]{1,6}$', s):      # 美股 ticker
+        return 'us' + s
+    return None
+
+
+def _fetch_holding_names(symbols) -> Dict[str, str]:
+    """批量抓持仓标的中文名，返回 {原symbol: 中文名}。单次 HTTP，失败静默返回 {}。"""
+    todo = {}
+    for raw in symbols:
+        if not raw or raw in _HOLDING_NAME_CACHE:
+            continue
+        tc = _tencent_symbol_code(raw)
+        if tc:
+            todo[tc] = raw
+    if not todo:
+        return {}
+    try:
+        r = requests.get(
+            'http://qt.gtimg.cn/q=' + ','.join(todo.keys()),
+            timeout=3,
+            headers={'User-Agent': 'Mozilla/5.0'},
+        )
+        r.raise_for_status()
+        text = r.content.decode('gbk', errors='replace')
+        got = {}
+        for line in text.split(';'):
+            line = line.strip()
+            if '~' not in line:
+                continue
+            fields = line.split('~')
+            # 各市场名称字段位不同（A股[1]/美股[1]/港股[1]前后差异），
+            # 统一取第一个含非 ASCII 的字段即中文名
+            name = next((f for f in fields if f and any(ord(c) > 127 for c in f)), '')
+            if not name:
+                continue
+            m = re.match(r'v_([A-Za-z0-9]+)=', line)
+            if not m:
+                continue
+            tc = m.group(1)
+            # 腾讯回显代码大小写不定，用原始映射表反查
+            raw_sym = None
+            for k, v in todo.items():
+                if k.upper() == tc.upper():
+                    raw_sym = v
+                    break
+            if raw_sym and name:
+                got[raw_sym] = name
+        with _HOLDING_NAME_LOCK:
+            _HOLDING_NAME_CACHE.update(got)
+        return got
+    except Exception as e:
+        logger.debug(f"[HoldingNames] 腾讯批量抓持仓名称失败: {e}")
+        return {}
 
 
 # [AI-2026-08-17] 判断某基金实时估值是否依赖 FUTU 行情源：其估值依赖的全部 symbol
@@ -239,14 +316,52 @@ def _get_realtime_jpy_spot_fx() -> Optional[float]:
     return None
 
 
+# [AI-2026-10-07] EUR/CNY 在岸价缓存（实时估值用，德/法 QDII 基金）
+_EUR_SPOT_FX_CACHE = {'rate': 0.0, 'time': 0.0}
+
+def _get_realtime_eur_spot_fx() -> Optional[float]:
+    """从新浪获取 EUR/CNY 实时在岸价（实盘汇率），15秒缓存
+
+    [AI-2026-10-07] 新浪 fx_seurcny 返回每1欧元兑人民币（如 7.488），
+    与数据库 eur_cny_mid 同口径（每1欧元），无需 ×100（区别于日元）。
+    """
+    now = time.time()
+    if now - _EUR_SPOT_FX_CACHE['time'] < 15 and _EUR_SPOT_FX_CACHE['rate'] > 0:
+        return _EUR_SPOT_FX_CACHE['rate']
+    try:
+        # [Plan C] 合并批量新浪：fx_seurcny 走缓存（自身 15s 缓存仍优先）
+        from arbcore.utils.sina_cache import get_sina_quotes
+        _raw_map = get_sina_quotes(['fx_seurcny'])
+        raw = _raw_map.get('fx_seurcny')
+        if raw:
+            parts = raw.split(',')
+            if len(parts) >= 2:
+                # [AI-2026-10-07] 每1欧元兑人民币，与 eur_cny_mid 同口径，不乘100
+                rate = float(parts[1])
+                if rate > 0:
+                    _EUR_SPOT_FX_CACHE['rate'] = rate
+                    _EUR_SPOT_FX_CACHE['time'] = now
+                    logger.debug(f"[FX] 欧元在岸价: {rate}")
+                    return rate
+    except Exception as e:
+        logger.warning(f"[FX] 获取欧元在岸价失败: {e}")
+    # [AI-2026-10-07] live 失败 → 回退 DB exchange_rate.eur_cny_spot（9:20 落库真值）
+    db_rate = _get_db_latest_spot('eur_cny_spot')
+    if db_rate:
+        logger.debug(f"[FX] live欧元在岸价失败，回退DB真值(9:20落库): {db_rate}")
+        return db_rate
+    return None
+
 
 # [AI-2026-08-07] 真源备用：live 在岸价拉取失败时，回退 DB exchange_rate 表最新落库真值
 # （每日 9:20 由 daily_updater 从新浪入库的 usd_cny_spot / jpy_cny_spot，是真实值非假数据，符合铁律）
 def _get_db_latest_spot(sym_col: str) -> Optional[float]:
     try:
         import sqlite3, os
-        # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；4层dirname到项目根父目录
-        db_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'database', 'arb_master.db')
+        # [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
+        # [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
+        from arbcore.database.db_manager import _resolve_db_path
+        db_path = _resolve_db_path()
         conn = sqlite3.connect(db_path)
         try:
             row = conn.execute(
@@ -304,6 +419,8 @@ _daily_snapshot = {
     'usd_cny_spot': None,
     'jpy_cny_mid': None,
     'jpy_cny_spot': None,
+    'eur_cny_mid': None,
+    'eur_cny_spot': None,
     'loaded': False,
 }
 
@@ -320,9 +437,12 @@ def _ensure_daily_snapshot(conn):
             _daily_snapshot['usd_cny_mid'] = fx_df.iloc[0]['usd_cny_mid']
         # [AI-2026-07-23] 加载日元中间价和在岸价（QDII日本基金用）
         try:
-            fx_df_all = pd.read_sql("SELECT usd_cny_mid, jpy_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1", conn)
+            fx_df_all = pd.read_sql("SELECT usd_cny_mid, jpy_cny_mid, eur_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1", conn)
             if not fx_df_all.empty and pd.notna(fx_df_all.iloc[0]['jpy_cny_mid']) and fx_df_all.iloc[0]['jpy_cny_mid'] > 0:
                 _daily_snapshot['jpy_cny_mid'] = fx_df_all.iloc[0]['jpy_cny_mid']
+            # [AI-2026-10-07] 加载欧元中间价（德/法 QDII 基金用）
+            if not fx_df_all.empty and pd.notna(fx_df_all.iloc[0]['eur_cny_mid']) and fx_df_all.iloc[0]['eur_cny_mid'] > 0:
+                _daily_snapshot['eur_cny_mid'] = fx_df_all.iloc[0]['eur_cny_mid']
         except Exception:
             pass
         # [AI-2026-07-23] 加载日元在岸价（实时估值用）
@@ -332,12 +452,50 @@ def _ensure_daily_snapshot(conn):
         if _daily_snapshot['usd_cny_spot'] is None or _daily_snapshot['usd_cny_spot'] <= 0:
             # [AI-2026-08-07] 缺失显 --，不回退中间价（SUPREME 铁律：禁止用旧值/其他源掩盖）
             logger.warning("[SNAPSHOT] 在岸价获取失败（非交易时段/网络异常），ETF实时估值将显 --")
+        # [AI-2026-10-07] 加载欧元在岸价（德/法 QDII 实时估值用）
+        _daily_snapshot['eur_cny_spot'] = _get_realtime_eur_spot_fx()
+        if _daily_snapshot['eur_cny_spot'] is None or _daily_snapshot['eur_cny_spot'] <= 0:
+            logger.warning("[SNAPSHOT] 欧元在岸价获取失败（非交易时段/网络异常），德/法ETF实时估值将显 --")
         # [AI-2026-08-02] 日元在岸价落库已移至 daily_updater step3（9:20 清晨刷新，确定时点）。
         #   _ensure_daily_snapshot 只负责加载（读），不负责写库（避免 web 进程首次加载时间不固定）。
         _daily_snapshot['loaded'] = True
-        logger.info(f"[SNAPSHOT] usd_cny_mid={_daily_snapshot['usd_cny_mid']}, usd_cny_spot={_daily_snapshot['usd_cny_spot']}, jpy_cny_mid={_daily_snapshot['jpy_cny_mid']}")
+        logger.info(f"[SNAPSHOT] usd_cny_mid={_daily_snapshot['usd_cny_mid']}, usd_cny_spot={_daily_snapshot['usd_cny_spot']}, jpy_cny_mid={_daily_snapshot['jpy_cny_mid']}, eur_cny_mid={_daily_snapshot['eur_cny_mid']}")
     except Exception as e:
         logger.warning(f"[SNAPSHOT] 加载汇率失败: {e}")
+
+
+# [AI-2026-10-06] 非交易日检测：汇率中间价未公布（exchange_rate 最新日期 != 今天）
+#   → 周末/法定假日，实时估值无意义，整体跳过（避免逐只基金刷 WARNING）。
+#   判定依据：exchange_rate 表最新一行日期。交易日 daily_updater 9:20 落库当日中间价，
+#   故"最新日期==今天"即视为交易日；节假日/周末最新行为上一交易日 → 非交易日。
+_trading_day_cache = {'value': None, 'time': 0.0}
+def _is_trading_day(conn) -> bool:
+    """判定今日是否为「中间价已公布的交易日」。
+
+    中间价(usd/hkd/jpy_cny_mid)仅在境内交易日由央行公布；节假日/周末虽仍可能有
+    即期 spot 行情，但中间价列为 NULL，且 exchange_rate 每日仍会落一行。故以"最新一行
+    是否存在任一中间价"作为交易日信号，而非单纯比较日期——这样国庆等长假期
+    （每日都有 spot 行、但 mid 全空）才能被正确识别为非交易日，整体跳过实时估值。
+    """
+    now = time.time()
+    if _trading_day_cache['value'] is not None and (now - _trading_day_cache['time']) < 60:
+        return _trading_day_cache['value']
+    try:
+        row = conn.execute(
+            "SELECT usd_cny_mid, hkd_cny_mid, jpy_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1"
+        ).fetchone()
+        if not row or all(r is None for r in row):
+            # 最新一行无任何中间价 → 节假日/周末 → 非交易日
+            _trading_day_cache['value'] = False
+        else:
+            _trading_day_cache['value'] = True
+    except Exception:
+        # 查询失败不阻断：默认按交易日处理（保留原有行为）
+        _trading_day_cache['value'] = True
+    _trading_day_cache['time'] = now
+    if not _trading_day_cache['value']:
+        logger.info("[REALTIME] 今日非交易日（汇率中间价未公布），整体跳过实时估值计算")
+    return _trading_day_cache['value']
 
 # [AI-2026-07-09] 分类已简化为：数据库 category 值与主看板 TAB 名一一对应，无子分类映射。
 # 传入的 category 直接作为 SQL 过滤值使用。
@@ -768,8 +926,10 @@ def prefetch_index_changes(symbols: List[str], conn=None) -> Dict[str, Dict[str,
             today_str = now.strftime('%Y-%m-%d')
             import sqlite3
             # [AI-2026-07-13] 修复路径少一层的问题：从 services/ 需往上3层到项目根，再到 database/
-            # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；4层dirname到项目根父目录
-            db_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'database', 'arb_master.db')
+            # [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
+            # [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
+            from arbcore.database.db_manager import _resolve_db_path
+            db_path = _resolve_db_path()
             conn_write = sqlite3.connect(db_path)
             for sym, data in api_results.items():
                 if sym in ('.INX', '.NDX') and data.get('price', 0) > 0:
@@ -1209,12 +1369,15 @@ class FundService:
                     current_fx = None
                     try:
                         _ensure_daily_snapshot(conn)
-                        if category == 'QDII日本':
+                        if code in EUR_FUND_CODES:
+                            current_fx = _daily_snapshot.get('eur_cny_mid')
+                        elif category == 'QDII日本':
                             current_fx = _daily_snapshot.get('jpy_cny_mid')
                         else:
                             current_fx = _daily_snapshot.get('usd_cny_mid')
                         if code in _FUNDS_WITH_SPOT_RATE:
-                            spot_fx = _daily_snapshot.get('usd_cny_spot') or 0
+                            spot_col = 'eur_cny_spot' if code in EUR_FUND_CODES else 'usd_cny_spot'
+                            spot_fx = _daily_snapshot.get(spot_col) or 0
                             if spot_fx > 0:
                                 current_fx = spot_fx
                     except Exception as e:
@@ -1462,6 +1625,8 @@ class FundService:
             _prof['realtime_quotes'] = _t.perf_counter()  # [埋点A] 实时价线程池段结束
 
             result = []
+            # [AI-2026-10-06] 非交易日检测（60s 缓存）：节假日/周末汇率中间价未公布，整体跳过实时估值
+            trading_day = _is_trading_day(conn)
             for _, fund in funds_df.iterrows():
                 code = fund['fund_code']
                 _vf_start = time.perf_counter()  # [埋点A] 逐基金计时起点
@@ -1476,6 +1641,12 @@ class FundService:
                 metrics = {'price': 0, 'nav': 0, 'static_val': 0, 'static_premium': 0,
                            'rt_val': None, 'rt_premium': None, 'sub_category': _FUNDS_SUB_CATEGORY.get(code, ''),
                            'volume': 0, 'trade_volume': 0, 'shares': 0, 'shares_added': 0, 'turnover_rate': 0}
+
+                # [AI-2026-10-06] 篮子缺价标记必须在每只基金循环顶部初始化：
+                # 原先只在下方 `if fund_cfg and trading_day:` 块内赋值（1905 行），非交易日
+                # (trading_day=False，如国庆休市) 整块跳过 → 2076 行引用即 UnboundLocalError，
+                # get_unified_dashboard_data 整体失败、看板空白。提到循环顶部保证全路径有定义。
+                _basket_missing_etf = False
 
                 if not metrics_df.empty:
                     valid_navs = metrics_df[metrics_df['nav'] > 0]
@@ -1570,7 +1741,7 @@ class FundService:
                         logger.error(f"Error getting realtime quote for {code}: {e}")
 
                 # ── [债券ETF] 511880/511360/511520 估值 ──
-                if code in BOND_ETF_CODES:
+                if code in BOND_ETF_CODES and trading_day:
                     try:
                         bv = get_bond_etf_valuation(self.db, self.market_data_service)
                         val = bv.get_valuation(code)
@@ -1611,7 +1782,7 @@ class FundService:
                 # [AI-2026-07-23] QDII日本基金：NK期货实时估值（Woody 公式）
                 # Woody: fVal = NK_real * JPYCNY_real / fFactor, fFactor = NK_base * JPYCNY_base / NAV_base
                 # 等价于: rt_val = NAV_base * [(1-pos) + pos * (NK_real/NK_base) * (JPYCNY_real/JPYCNY_base)]
-                if category == 'QDII日本' and metrics.get('nav', 0) > 0:
+                if category == 'QDII日本' and metrics.get('nav', 0) > 0 and trading_day:
                     try:
                         nk_quote = self.market_data_service.get_realtime_quote('NK') if self.market_data_service else None
                         nk_current = float(nk_quote.get('price', 0) or 0) if nk_quote else 0.0
@@ -1654,7 +1825,7 @@ class FundService:
 
                 # 尝试实时计算估值 (仅非债券ETF已有，此处保留原逻辑)
                 try:
-                    if code == '161226':
+                    if code == '161226' and trading_day:
                         import requests
                         from arbcore.utils.market_calendar import is_shfe_open
                         # [2026-07-30 FIX] SHFE 沪银交易时段守卫：休市时段（午夜-早盘间隙、周末、节假日）
@@ -1801,7 +1972,7 @@ class FundService:
                             metrics['index_close'] = 0.0
                     # 3.2 【普通国内LOF/QDII亚洲极速估值】 - 仅对无权重篮子且无trade_etf的基金使用简化指数估值
                     # [AI-2026-09-11] rt_val 计算与 index_close 解耦：此处仅在 rt_val 尚未算出且指数源可用时补算。
-                    if not metrics.get('rt_val') and code not in funds_with_basket and not is_us_etf and not _YAML_TRADE_ETF.get(code, '') and rel_idx and rel_idx != '-':
+                    if not metrics.get('rt_val') and code not in funds_with_basket and not is_us_etf and not _YAML_TRADE_ETF.get(code, '') and rel_idx and rel_idx != '-' and trading_day:
                         nav_home = float(metrics.get('nav', 0))
                         if nav_home > 0:
                             idx_data = index_changes_map.get(rel_idx)
@@ -1840,14 +2011,18 @@ class FundService:
                         except:
                             pass
                         
-                        if fund_cfg:
+                        if fund_cfg and trading_day:
                             # 获取最新汇率
                             current_fx = None
                             try:
                                 # [V10.1] 汇率当天不变，直接读内存
                                 _ensure_daily_snapshot(conn)
                                 # [AI-2026-07-23] QDII日本基金使用日元中间价
-                                if category == 'QDII日本':
+                                if code in EUR_FUND_CODES:
+                                    current_fx = _daily_snapshot.get('eur_cny_mid')
+                                    if not current_fx or current_fx <= 0:
+                                        logger.warning(f"[{code}] eur_cny_mid 不可用，跳过实时估值")
+                                elif category == 'QDII日本':
                                     current_fx = _daily_snapshot.get('jpy_cny_mid')
                                     if not current_fx or current_fx <= 0:
                                         logger.warning(f"[{code}] jpy_cny_mid 不可用，跳过实时估值")
@@ -1855,7 +2030,8 @@ class FundService:
                                     current_fx = _daily_snapshot.get('usd_cny_mid')
                                 # [V11.0] 在岸价基金：用快照里的在岸价（启动时已从新浪加载）
                                 if code in _FUNDS_WITH_SPOT_RATE:
-                                    spot_fx = _daily_snapshot.get('usd_cny_spot') or 0
+                                    spot_col = 'eur_cny_spot' if code in EUR_FUND_CODES else 'usd_cny_spot'
+                                    spot_fx = _daily_snapshot.get(spot_col) or 0
                                     if spot_fx > 0:
                                         current_fx = spot_fx
                                         logger.debug(f"[{code}] 使用快照在岸价: {spot_fx}")
@@ -1979,7 +2155,7 @@ class FundService:
                             # 尝试用 trade_etf 备用源 [V10.8]
                             # basket为空时（如162411的XOP），直接用 trade_etf 获取实时ETF价格做 hedge 估值
                             # 放在 current_fx 条件外，让无basket基金也能走魔法公式
-                            if not metrics.get('rt_val'):
+                            if not metrics.get('rt_val') and trading_day:
                                 trade_etf = fund_cfg.get('trade_etf', '')
                                 if trade_etf and trade_etf != '-' and self.market_data_service:
                                     # [V10.9] [AI-2026-09-02 注释修正] 跳过指数类符号（HSI/HSTECH等）。
@@ -2260,8 +2436,8 @@ DailyUpdater()._step4_fetch_prices()
                    h.static_val, h.premium as static_premium, h.calibration,
                    h.index_close, h.index_pct, h.shares, h.shares_added, h.trade_volume, h.turnover_rate, h.volume,
                    h.valuation_error,
-                    r.usd_cny_mid, r.hkd_cny_mid, r.jpy_cny_mid,
-                    f.hedge, f.position
+                   r.usd_cny_mid, r.hkd_cny_mid, r.jpy_cny_mid, r.eur_cny_mid,
+                   f.hedge, f.position
             FROM unified_fund_history h
             LEFT JOIN exchange_rate r ON h.date = r.date
             LEFT JOIN fund_daily_factors f ON h.date = f.date AND h.fund_code = f.fund_code
@@ -2270,9 +2446,10 @@ DailyUpdater()._step4_fetch_prices()
             df = pd.read_sql(query_hist, conn, params=(fund_code,))
             if df.empty: return []
 
-            # 判断基金类型：港币/日元基金，在返回的 usd_cny_mid 字段里替换对应汇率
+            # 判断基金类型：港币/日元/欧元基金，在返回的 usd_cny_mid 字段里替换对应汇率
             is_hkd_fund = False
             is_jp_fund = False
+            is_eur_fund = False
             try:
                 fund_info_df = pd.read_sql("SELECT category, idx_name FROM unified_fund_list WHERE fund_code=? LIMIT 1", conn, params=(fund_code,))
                 if not fund_info_df.empty:
@@ -2282,6 +2459,8 @@ DailyUpdater()._step4_fetch_prices()
                         is_hkd_fund = True
                     if '日本' in cat:
                         is_jp_fund = True
+                    if fund_code in EUR_FUND_CODES:
+                        is_eur_fund = True
             except:
                 pass
 
@@ -2289,6 +2468,30 @@ DailyUpdater()._step4_fetch_prices()
                 df['usd_cny_mid'] = df['hkd_cny_mid']
             if is_jp_fund and 'jpy_cny_mid' in df.columns:
                 df['usd_cny_mid'] = df['jpy_cny_mid']
+            if is_eur_fund and 'eur_cny_mid' in df.columns:
+                df['usd_cny_mid'] = df['eur_cny_mid']
+
+            # [AI-2026-10-07] 估值来源弹窗展示用：附加估值组合(valuation_portfolio) +
+            # 跟踪指数(related_index) + 汇率币种(fx_currency)，供前端按"指数+参考ETF"渲染，
+            # 取代原先扫描历史行 *_price 键（指数法基金无篮子→持仓空白/错显）。
+            vp_list = []
+            rel_idx_str = ''
+            fx_ccy = 'USD'
+            try:
+                ri_df = pd.read_sql("SELECT related_index FROM unified_fund_list WHERE fund_code=? LIMIT 1", conn, params=(fund_code,))
+                if not ri_df.empty:
+                    rel_idx_str = str(ri_df.iloc[0]['related_index'] or '')
+                yf = next((f for f in (yaml_cfg.get('funds') or []) if str(f.get('code')) == str(fund_code)), None)
+                if yf:
+                    vp_list = yf.get('valuation_portfolio') or yf.get('hedging_portfolio') or []
+            except Exception:
+                pass
+            if is_eur_fund:
+                fx_ccy = 'EUR'
+            elif is_jp_fund:
+                fx_ccy = 'JPY'
+            elif is_hkd_fund:
+                fx_ccy = 'HKD'
 
             # 计算估值误差（绝对差值）: val_error_pct = static_val - nav（非百分比）
             # [AI-2026-07-04] 改为绝对差值，不再用百分比
@@ -2548,7 +2751,13 @@ DailyUpdater()._step4_fetch_prices()
                 # 1) 从 related_index 获取主 ETF
                 fl_row = conn.execute("SELECT related_index FROM unified_fund_list WHERE fund_code=?", (fund_code,)).fetchone()
                 trade_etf = fl_row[0] if fl_row and fl_row[0] and fl_row[0] != '-' else ''
-                etf_symbols = [trade_etf] if trade_etf else []
+                has_basket = conn.execute("SELECT COUNT(*) FROM fund_basket_weights WHERE fund_code=?", (fund_code,)).fetchone()[0] > 0
+                # [AI-2026-10-07 东哥抓错] 指数法基金（yaml 未声明 trade_etf 且无篮子）的 related_index 是"指数名"，
+                #   绝不能当 ETF 去 usa_etf_daily_prices 取价——会同名美股 ETF 撞车：
+                #   如 related_index='DAX'(德国DAX指数~25266) 撞 Global X DAX Germany ETF(美股代码就叫 DAX，~44.71)。
+                #   这类基金一律只走下方 real_index_map（index_history 的 index_close/index_pct）。
+                _is_index_based = (not yaml_trade_etf) and (not has_basket)
+                etf_symbols = [trade_etf] if (trade_etf and not _is_index_based) else []
 
                 # 2) 从 basket 获取所有 ETF 符号（含锚点变体如 ^GLD-EU）
                 basket_rows = conn.execute(
@@ -2564,7 +2773,6 @@ DailyUpdater()._step4_fetch_prices()
                 # [AI-2026-07-29] 修复164701误判：164701篮子仅GLD=100%(SLV权重0未入库)，且 related_index/trade_etf 恰为GLD，
                 #   导致 etf_symbols=['GLD'] 被当成单ETF→显示"GLD净值"。但164701本质是有篮子表的基金，应按多篮子显示"GLD价格"。
                 #   故加 has_basket 约束：凡 fund_basket_weights 有记录者一律视为多篮子→取价格（与 dynamic_valuation 口径一致）。
-                has_basket = conn.execute("SELECT COUNT(*) FROM fund_basket_weights WHERE fund_code=?", (fund_code,)).fetchone()[0] > 0
                 is_single_etf = (not has_basket) and bool(yaml_trade_etf) and len(etf_symbols) == 1 and etf_symbols[0] == yaml_trade_etf
                 col_name = 'netvalue' if is_single_etf else 'price'
 
@@ -2665,6 +2873,10 @@ DailyUpdater()._step4_fetch_prices()
 
                 item['nav_date'] = latest_nav_date
                 item['latest_nav'] = latest_nav
+                # [AI-2026-10-07] 估值来源弹窗用：附估值组合/跟踪指数/汇率币种
+                item['valuation_portfolio'] = vp_list
+                item['related_index'] = rel_idx_str
+                item['fx_currency'] = fx_ccy
 
                 # [AI-2026-06-28] 静态溢价已由入库时用 T-1 净值算好，直接使用 h.premium
                 # 不再覆盖计算，避免 AI 瞎改
@@ -2811,8 +3023,17 @@ DailyUpdater()._step4_fetch_prices()
                 return []
             # 转换为时间戳X轴格式：MM-DD HH:MM
             df['display_time'] = df['date'] + ' ' + df['time']
-            return df[['display_time', 'price', 'rt_val', 'premium', 'open_premium', 'close_premium',
-                      'lof_bid1', 'lof_ask1', 'etf_bid1', 'etf_ask1']].to_dict(orient='records')
+            # [AI-2026-10-07] 清洗非有限浮点：DB 里盘口列(open_premium/lof_bid1/etf_bid1 等)
+            #   为 NULL 时 pandas 读出 NaN，直接返回会让 Starlette 的
+            #   json.dumps(allow_nan=False) 抛 "Out of range float values are not JSON compliant"
+            #   → 该端点对所有基金 500。此处 NULL/NaN → None（前端显示为空档），从前端曲线恢复。
+            import math as _math
+            records = df[['display_time', 'price', 'rt_val', 'premium', 'open_premium', 'close_premium',
+                          'lof_bid1', 'lof_ask1', 'etf_bid1', 'etf_ask1']].to_dict(orient='records')
+            return [
+                {k: (None if isinstance(v, float) and not _math.isfinite(v) else v) for k, v in row.items()}
+                for row in records
+            ]
         finally: conn.close()
 
     def get_fund_basket(self, fund_code: str) -> List[Dict[str, Any]]:
@@ -2910,11 +3131,15 @@ DailyUpdater()._step4_fetch_prices()
             # [AI-2026-07-23] 根据基金类别选择汇率字段
             meta_cat_df = pd.read_sql("SELECT category FROM unified_fund_list WHERE fund_code=?", conn, params=(code,))
             meta_category = str(meta_cat_df.iloc[0]['category']).strip() if not meta_cat_df.empty else ''
+            # [AI-2026-10-07] 节假日中间价未公布：最新一行 mid 列为 NULL（行仍存在），
+            #   float(None) 崩溃 → valuation_meta 整体 error → 实时估值计算器页面全空。
+            #   修法与 _is_trading_day 节假日口径一致：取最近一个「有官方中间价」的交易日，
+            #   用的是最近一次官方公布值（非造假兜底）；行不存在才落原默认值。
             if meta_category == 'QDII日本':
-                fx_df = pd.read_sql("SELECT jpy_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1", conn)
+                fx_df = pd.read_sql("SELECT jpy_cny_mid FROM exchange_rate WHERE jpy_cny_mid IS NOT NULL ORDER BY date DESC LIMIT 1", conn)
                 latest_fx = float(fx_df.iloc[0]['jpy_cny_mid']) if not fx_df.empty else 4.16
             else:
-                fx_df = pd.read_sql("SELECT usd_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1", conn)
+                fx_df = pd.read_sql("SELECT usd_cny_mid FROM exchange_rate WHERE usd_cny_mid IS NOT NULL ORDER BY date DESC LIMIT 1", conn)
                 latest_fx = float(fx_df.iloc[0]['usd_cny_mid']) if not fx_df.empty else 7.0
 
             # 获取最新实时行情 (用于标的 ETF 价格和期货价格)
@@ -3173,6 +3398,11 @@ DailyUpdater()._step4_fetch_prices()
                 except Exception as e:
                     logger.error(f"[BondETF] 估值元数据获取失败 {code}: {e}")
             
+            # [AI-2026-10-07] 持仓中文名（纯展示；抓取失败为 {}，前端只显示代码）
+            _hold_syms = [(it.get('symbol') or '') for it in (fund_cfg.get('valuation_portfolio') or fund_cfg.get('hedging_portfolio') or [])]
+            _fetch_holding_names(_hold_syms)
+            _holding_names = {s: _HOLDING_NAME_CACHE[s] for s in _hold_syms if s in _HOLDING_NAME_CACHE}
+
             result = {
                 "status": "ok",
                 "fund_config": fund_cfg,
@@ -3181,6 +3411,7 @@ DailyUpdater()._step4_fetch_prices()
                 "latest_exchange_rate": latest_fx,
                 "realtime_quotes": realtime_quotes,
                 "future_quote": future_quote,
+                "holding_names": _holding_names,
                 **bond_extra
             }
             _valuation_meta_cache.set(code, result)

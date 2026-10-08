@@ -110,9 +110,14 @@ class RuleEngine:
     def _get_conn(self):
         if not self._db_path:
             # 备用源路径
-            # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；root再上两层到项目根父目录
-            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            self._db_path = os.path.join(os.path.dirname(root), '..', '..', 'database', 'arb_master.db')
+            # [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
+            # [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
+            try:
+                from arbcore.database.db_manager import _resolve_db_path
+                self._db_path = _resolve_db_path()
+            except Exception:
+                root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                self._db_path = os.path.join(os.path.dirname(root), '..', '..', 'database', 'arb_master.db')
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         return conn

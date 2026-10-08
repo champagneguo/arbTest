@@ -218,7 +218,13 @@
         <n-card size="small" class="shadow-soft" style="margin-bottom: 16px;">
           <template #header>
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
-              <div style="font-size: 14px; font-weight: bold;">持仓静态估值（7-1 至今）</div>
+              <div style="display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;">
+                <div style="font-size: 14px; font-weight: bold; white-space: nowrap;">持仓静态估值（7-1 至今）</div>
+                <div style="font-size: 11px; color: #94a3b8; line-height: 1.35;">
+                  <div>T-1估值(D) = T-2净值 × (1 + Σᵢ 占净值ᵢ × 人民币口径涨跌ᵢ)</div>
+                  <div>人民币口径涨跌ᵢ = (1 + 标的涨跌ᵢ[前复权]) × (1 + 汇率涨跌ᵢ) − 1</div>
+                </div>
+              </div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <!-- [AI-2026-10-05 东哥需求] 导出人工核对用 CSV（汇率两日原值 + 底层 ETF 明细 + Excel 公式） -->
                 <n-button
@@ -1266,41 +1272,85 @@ const holdingColumns: DataTableColumns<any> = [
 ]
 
 // [AI-2026-09-11] 持仓静态估值弹窗表：列 = 日期 / 官方净值 / 静态估值 / 误差%，涨跌幅等移入展开行
-// [AI-2026-09-15] 底层 ETF 明细不再写死 160723 篮子：每行从自身 etf_prev/etf_prices 取键
-// （后端按各基金季报篮子逐只生成，顺序即持仓权重序），161129/501018 各显各的篮子。
-const rowEtfSymbols = (row: any): string[] =>
-  Array.from(new Set([...Object.keys(row.etf_prev || {}), ...Object.keys(row.etf_prices || {})]))
+// [AI-2026-10-06] 展开行升级为「季报持仓还原六腿表」（见 renderExpand）；数据取自 row.weights/etf_prev/etf_prices/fx_detail。
 
 const recalcColumns: DataTableColumns<any> = [
   {
     type: 'expand',
-    renderExpand: (row: any) => {
+      renderExpand: (row: any) => {
       // [AI-2026-09-24 方案A] 待补行无底层明细可展开，直接说明原因
       if (row.pending) {
         return h('div', { style: 'padding: 8px 12px; font-size: 12px; color: #92400e;' }, row.note || '美股价未入库，该行待补')
       }
-      const items = rowEtfSymbols(row).map((s) => {
+      // [AI-2026-10-06 东哥需求] 展开行由「底层 ETF 明细」flex 列表升级为「季报持仓还原六腿表」
+      // （eye-catching 呈现，但自有口径/配色；并公开估值公式，契合开放人设）。
+      const syms = Array.from(new Set([
+        ...Object.keys(row.weights || {}),
+        ...Object.keys(row.etf_prev || {}),
+        ...Object.keys(row.etf_prices || {}),
+      ]))
+      const legs = syms.map((s) => {
+        const w = row.weights?.[s]
         const p0 = row.etf_prev?.[s]
         const p1 = row.etf_prices?.[s]
-        const chg = (p0 != null && p1 != null && p0 > 0) ? (p1 / p0 - 1) * 100 : null
-        return { s, p0, p1, chg }
+        const rLocal = (p0 != null && p1 != null && p0 > 0) ? p1 / p0 - 1 : null
+        const fx = row.fx_detail?.[s]
+        const rFx = fx?.r_fx
+        const rI = (rLocal != null && rFx != null) ? (1 + rLocal) * (1 + rFx) - 1 : null
+        // 估值影响(%)= 占净值(%) × 人民币口径涨跌(小数)；Σ 即总变动%
+        const contrib = (w != null && rI != null) ? w * rI : null
+        return { s, cur: fx?.cur || 'USD', w, p0, p1, rLocal, rFx, fx0: fx?.fx0, fx1: fx?.fx1, rI, contrib }
       })
-      return h('div', { style: 'padding: 8px 12px; font-size: 12px; color: #475569;' }, [
-        h('div', { style: 'margin-bottom: 6px; font-weight: 600; color: #334155;' }, '底层 ETF 明细'),
-        ...items.map((it) =>
-          h('div', { style: 'display: flex; gap: 16px; padding: 2px 0;' }, [
-            h('span', { style: 'width: 52px; font-weight: 600; color: #1e293b;' }, it.s),
-            h('span', {}, `前日 ${it.p0 != null ? it.p0.toFixed(2) : '-'}`),
-            h('span', {}, `当日 ${it.p1 != null ? it.p1.toFixed(2) : '-'}`),
-            h('span', {
-              style: `color: ${it.chg != null ? (it.chg >= 0 ? '#dc2626' : '#16a34a') : '#999'}; font-weight: 600;`,
-            }, it.chg != null ? `${it.chg >= 0 ? '+' : ''}${it.chg.toFixed(2)}%` : '-'),
-          ])
-        ),
-        h('div', { style: 'margin-top: 6px; color: #64748b;' }, `USD/CNY: ${row.usd_cny != null ? row.usd_cny.toFixed(4) : '-'}`),
+      const sumW = legs.reduce((a, l) => a + (l.w || 0), 0)
+      const sumContrib = legs.reduce((a, l) => a + (l.contrib || 0), 0)
+      const residual = 100 - sumW
+      // [AI-2026-10-06 东哥需求] 清淡风重刷（自有浅色系，绝不用他三色）；样式类见 <style scoped> .leg-table
+      const UP = '#cc4a3c'   // 红涨（柔化陶红）
+      const DOWN = '#1e9e63' // 绿跌（柔化）
+      const pctStr = (v: number | null) => v != null ? `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%` : '-'
+      const ppStr = (v: number | null) => v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` : '-'
+      const colColor = (v: number | null) => v == null ? '#cbd5e1' : (v >= 0 ? UP : DOWN)
+      const th = (t: string, align = 'right') => h('th', { class: align === 'left' ? 'lt-left' : (align === 'center' ? 'lt-center' : '') }, t)
+      const td = (children: any, cls = '', style = '') => h('td', { class: cls, style }, children)
+      const dash = () => td('—', 'lt-center lt-muted')
+      const legRows = legs.map((l) => h('tr', {}, [
+        td([h('span', { style: 'font-weight:600; color:#1e293b;' }, l.s), h('span', { class: 'cur-pill' }, l.cur)], 'lt-left'),
+        td(l.w != null ? `${l.w.toFixed(2)}%` : '-'),
+        td([
+          h('span', {}, l.p0 != null ? l.p0.toFixed(2) : '-'),
+          h('span', { class: 'fx-arrow' }, '→'),
+          h('span', { style: 'color:#334155;' }, l.p1 != null ? l.p1.toFixed(2) : '-'),
+        ], 'lt-center'),
+        td(pctStr(l.rLocal), '', `color:${colColor(l.rLocal)}; font-weight:600;`),
+        td(l.fx0 != null || l.fx1 != null ? [
+          h('span', { class: 'fx-pair' }, `${l.fx0 != null ? l.fx0.toFixed(4) : '-'} → ${l.fx1 != null ? l.fx1.toFixed(4) : '-'}`),
+          h('span', { style: `margin-left:8px; color:${colColor(l.rFx)};` }, pctStr(l.rFx)),
+        ] : '-'),
+        td(ppStr(l.contrib), '', `color:${colColor(l.contrib)}; font-weight:600;`),
+      ]))
+      const sumRow = h('tr', { class: 'lt-sum' }, [
+        td('合计', 'lt-left'),
+        td(`${sumW.toFixed(2)}%`),
+        dash(), dash(), dash(),
+        td(ppStr(sumContrib), '', 'color:#0f172a;'),
+      ])
+      const residualRow = h('tr', { class: 'lt-residual' }, [
+        td('未披露持仓（按 0% 变化）', 'lt-left'),
+        td(`${residual.toFixed(2)}%`),
+        dash(), dash(), dash(),
+        td('0.00%'),
+      ])
+      const table = h('table', { class: 'leg-table' }, [
+        h('thead', {}, h('tr', {}, [
+          th('腿', 'left'), th('占净值'), th('T-2→T-1 收盘', 'center'), th('标的涨跌'), th('汇率(前日→当日)'), th('估值影响'),
+        ])),
+        h('tbody', {}, [...legRows, sumRow, residualRow]),
+      ])
+      return h('div', { style: 'margin:2px 0 4px; background:#ffffff; border:1px solid #eef1f4; border-radius:10px; padding:2px 10px 8px; box-shadow:0 1px 2px rgba(15,23,42,.04);' }, [
+        table,
         h('div', {
-          style: `margin-top: 6px; font-weight: ${row.fill_warning || row.carried_forward ? 600 : 400}; color: ${row.fill_warning ? '#dc2626' : (row.carried_forward ? '#d97706' : '#64748b')};`,
-        }, `备注: ${row.note || '数据齐全'}`),
+          style: `margin-top: 6px; font-size:11px; font-weight: ${row.fill_warning || row.carried_forward ? 600 : 400}; color: ${row.fill_warning ? '#cc4a3c' : (row.carried_forward ? '#d97706' : '#94a3b8')};`,
+        }, `备注: ${row.note || '数据齐全'}${row.fill_warning ? '（⚠️ 非假期缺价，前填推算，请核实）' : ''}${row.carried_forward ? '（🔸 部分标的沿用上一交易日收盘价）' : ''}`),
       ])
     },
   },
@@ -1495,4 +1545,70 @@ onMounted(() => {
 :deep(.recalc-pending-row:hover td) {
   background-color: #f1f5f9 !important;
 }
+</style>
+
+<style>
+/* [AI-2026-10-06] 季报持仓还原六腿表·清淡表格风：白卡+浅竖线分列+浅底表头+hover，涨跌色柔化（红#cc4a3c/绿#1e9e63）
+   ⚠️ 必须放普通 <style>（非 scoped）：renderExpand 是传给 naive-ui DataTable 的渲染函数，
+   表格 DOM 在 naive-ui 内部渲染、没有本组件的 data-v 属性，scoped 选择器（.leg-table[data-v-xxx]）永远不匹配。
+   类名 .leg-table/.cur-pill 足够独特，全局块无泄漏风险。 */
+.leg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.leg-table th {
+  text-align: right;
+  font-weight: 600;
+  font-size: 11px;
+  color: #64748b;
+  padding: 6px 10px;
+  background: #f6f8fa;
+  border-bottom: 1px solid #e8eaed;
+  border-right: 1px solid #eef1f4;
+  white-space: nowrap;
+}
+.leg-table th:last-child { border-right: none; }
+.leg-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #f1f5f9;
+  border-right: 1px solid #f6f8fa;
+  color: #475569;
+  text-align: right;
+  white-space: nowrap;
+}
+.leg-table td:last-child { border-right: none; }
+.leg-table tbody tr:hover {
+  background: #f8fafc;
+}
+.leg-table .lt-left { text-align: left; }
+.leg-table .lt-center { text-align: center; }
+.leg-table .lt-muted { color: #cbd5e1; }
+.leg-table .lt-sum td {
+  border-top: 1px solid #e8eaed;
+  border-bottom: none;
+  background: #fafbfc;
+  font-weight: 600;
+  color: #0f172a;
+}
+.leg-table .lt-residual td {
+  border-bottom: none;
+  color: #94a3b8;
+  font-style: italic;
+}
+.cur-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #eef3f8;
+  color: #5b7fa6;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 14px;
+  vertical-align: 1px;
+}
+.fx-pair { color: #64748b; }
+.fx-arrow { color: #cbd5e1; margin: 0 4px; }
 </style>

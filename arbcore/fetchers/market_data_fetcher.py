@@ -7,12 +7,12 @@ import os
 import sqlite3
 import pandas as pd
 
-# 共享数据库路径 - 可通过环境变量覆盖
-# [AI-2026-08-16] 改为 __file__ 相对推导，支持项目整体下移一层到 src/（不再硬编码 D:\Study\arbTest）
-_ARBCORE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # .../arbcore
-_PROJECT_ROOT = os.path.dirname(_ARBCORE_DIR)                                # 项目根（src）
-# [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；项目根父目录/database
-_SHARED_DB_PATH = os.environ.get('ARB_MASTER_DB', os.path.join(os.path.dirname(_PROJECT_ROOT), "database", "arb_master.db"))
+# [AI-2026-10-07] 主库唯一：走 arbcore 统一解析（env ARB_MASTER_DB → 上溯 _shared/arb_master.db）。
+# 旧 fallback 拼的是 <LOFarb>/database/arb_master.db —— 2026-10-06 主库收敛到 _shared 后该路径已不存在，
+# 而 sqlite3.connect 对不存在的文件会静默新建空库（同「命中空库致分类全丢」的事故模式）。
+from arbcore.database.db_manager import _resolve_db_path
+
+_SHARED_DB_PATH = os.environ.get('ARB_MASTER_DB') or _resolve_db_path()
 
 
 def get_exchange_rate():

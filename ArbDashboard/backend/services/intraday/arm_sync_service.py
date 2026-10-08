@@ -24,10 +24,12 @@ import subprocess
 import threading
 from datetime import datetime
 
-# 与 scripts/sync_arm_intraday.py 保持一致
-LOCAL_DB = 'D:/Study/arbTest/database/arb_master.db'
+from arbcore.database.db_manager import _resolve_db_path
+
+# 主库唯一：与 backend/main.py 同款，走 arbcore 统一解析
+LOCAL_DB = _resolve_db_path()
 ARM_SCP_DB = 'arm:/home/ubuntu/arbtest/database/arb_master.db'
-TEMP_DB = 'D:/Study/arbTest/database/arb_master_sync.db'
+TEMP_DB = os.path.join(os.path.dirname(LOCAL_DB), 'arb_master_sync.db')
 
 # 关注基金：仅这 3 只做分时同步（与 H5 intradayCodes 一致）
 ARM_SYNC_FUNDS = ['162411', '164701', '161116']

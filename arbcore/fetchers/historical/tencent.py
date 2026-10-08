@@ -36,7 +36,7 @@ class TencentHistoricalFetcher(BaseHistoricalFetcher):
                 days_to_fetch = max(100, delta.days + 5)
             except: pass
 
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param={tencent_code},day,,,{days_to_fetch},qfq&r=0.1"
+        url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param={tencent_code},day,,,{days_to_fetch},qfq&r=0.1"
         try:
             res = requests.get(url, headers=self.headers, timeout=10, proxies={"http": None, "https": None})
             text = res.text.split('kline_dayqfq=')[-1]
@@ -50,7 +50,9 @@ class TencentHistoricalFetcher(BaseHistoricalFetcher):
                 # 尝试不带 qfq
                 day_data = target_data.get('qfqday', [])
             
-            if not day_data: return pd.DataFrame()
+            if not day_data:
+                # [BUG-2026-10-06-05] 腾讯无K线数据 → 新浪兜底（WAF 拦截期间自动切换）
+                return self._fetch_via_sina(symbol, start_date, end_date)
             
             # 腾讯K线格式: [日期, 开盘, 收盘, 最高, 最低, 成交量(手)]
             # 例如: ['2026-06-12', '1.875', '1.864', '1.875', '1.860', '29251.000']
@@ -72,8 +74,8 @@ class TencentHistoricalFetcher(BaseHistoricalFetcher):
                 
             return df.sort_values('date', ascending=False)
         except Exception as e:
-            logger.error(f"腾讯获取 {symbol} 失败: {e}")
-            return pd.DataFrame()
+            logger.error(f"腾讯获取 {symbol} 失败: {e}，尝试新浪兜底")
+            return self._fetch_via_sina(symbol, start_date, end_date)
 
     def normalize_symbol(self, symbol: str) -> str:
         s = symbol.upper()
@@ -93,3 +95,28 @@ class TencentHistoricalFetcher(BaseHistoricalFetcher):
             parts = s.split('.')
             return f"{parts[1].lower()}{parts[0]}"
         return s.lower()
+
+    def _fetch_via_sina(self, symbol: str, start_date=None, end_date=None) -> pd.DataFrame:
+        """[BUG-2026-10-06-05] 腾讯K线被 WAF 拦截时的新浪兜底。
+        新浪 A 股代码规则与腾讯一致（sz/sh 按交易所），直接复用纯数字代码，无需前缀转换。
+        """
+        try:
+            from .sina import SinaHistoricalFetcher
+            sina = SinaHistoricalFetcher()
+            # 提取纯数字代码（去 sh/sz/hk 前缀），交给新浪自行判断市场
+            low = symbol.lower()
+            pure = low[2:] if low[:2] in ('sh', 'sz', 'hk') else low
+            df = sina.fetch_prices(pure, start_date, end_date)
+            if df is None or df.empty:
+                return pd.DataFrame()
+            # 对齐腾讯 fetch_prices 返回列，避免下游 KeyError
+            if 'volume_hands' not in df.columns:
+                df['volume_hands'] = 0
+            if 'volume_shares' not in df.columns:
+                df['volume_shares'] = 0
+            if 'volume' not in df.columns:
+                df['volume'] = 0
+            return df.sort_values('date', ascending=False)
+        except Exception as e:
+            logger.error(f"新浪兜底 {symbol} 也失败: {e}")
+            return pd.DataFrame()

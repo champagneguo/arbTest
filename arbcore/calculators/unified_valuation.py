@@ -48,12 +48,15 @@ def basket_valuation(
         return None  # [AI-2026-08-04 SUPREME] position 缺失不兜底，返回 None 让上游显"--"
     if components is None or len(components) == 0:
         return None
+    # 汇率缺失（如节假日 exchange_rate 为空）→ 直接返回 None，交由上游显 "--"
+    if fx_base is None or fx_now is None:
+        return None
 
     # ── 魔法公式（hedge 常量折叠）──
     if hedge is not None and hedge > 0 and len(components) == 1:
         c = components[0]
         cp = c.get('current_price', 0) or 0
-        if cp > 0 and fx_now > 0:
+        if cp > 0 and fx_now is not None and fx_now > 0:
             return base_nav * (1.0 - position) + (cp * fx_now) / hedge
 
     # ── 矩阵公式（标准篮子）──

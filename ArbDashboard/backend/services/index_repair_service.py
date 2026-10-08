@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 # 路径配置
 # ============================================================
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-# [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；项目根父目录/database
+# [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
 PROJECT_ROOT = os.path.normpath(os.path.join(BACKEND_DIR, '..', '..', '..'))
-DB_PATH = os.path.join(os.path.dirname(PROJECT_ROOT), 'database', 'arb_master.db')
+# [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
+try:
+    from arbcore.database.db_manager import _resolve_db_path as _resolve_master_db
+    DB_PATH = _resolve_master_db()
+except Exception:
+    DB_PATH = os.path.join(os.path.dirname(PROJECT_ROOT), 'database', 'arb_master.db')
 
 # 同主码表：和 backfill_tdx_index.py 保持一致
 A_SHARE_SZ_PREFIX = {'399300','399001','399997','399989','399330','399441','399707',
@@ -224,7 +229,7 @@ def _fetch_qq_hk_index(symbol: str, days: int = 30) -> list:
     
     Returns: [(date_str, close_price), ...] 按日期升序
     """
-    url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+    url = (f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?"
            f"_var=kline_dayqfq&param=hk{symbol},day,,,{days},qfq")
     try:
         resp = requests.get(url, timeout=15)
@@ -247,7 +252,23 @@ def _fetch_qq_hk_index(symbol: str, days: int = 30) -> list:
                     pass
         return sorted(result, key=lambda x: x[0])
     except Exception as e:
-        logger.warning(f"[QQ] 获取 hk{symbol} 失败: {e}")
+        logger.warning(f"[QQ] 获取 hk{symbol} 失败({e})，试东财兜底")
+        try:
+            em_secid = f"116.{symbol}" if (len(symbol) == 5 and symbol.isdigit()) else f"100.{symbol}"
+            em_url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={em_secid}"
+                      f"&ut=fa5fd1947f08e6d3cb8d1e3a8a3c7b2e&fields1=f1f1f2&fields2=f51f52f53f54f55f56"
+                      f"&klt=101&fqt=0&end=20500101&lmt={days}")
+            em = requests.get(em_url, timeout=15).json()
+            kl = (em.get("data") or {}).get("klines") or []
+            res = []
+            for row in kl:
+                p = row.split(",")
+                if len(p) >= 3 and p[0] and p[2]:
+                    res.append((p[0], float(p[2])))
+            if res:
+                return sorted(res, key=lambda x: x[0])
+        except Exception as e2:
+            logger.error(f"东财港股 hk{symbol} 也失败: {e2}")
         return []
 
 
@@ -255,7 +276,7 @@ def _fetch_qq_a_share(symbol: str, market: str, days: int = 30) -> list:
     """
     从腾讯财经获取 A 股指数日线数据（备用，Sina 失败时使用）。
     """
-    url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+    url = (f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?"
            f"_var=kline_dayqfq&param={market}{symbol},day,,,{days},qfq")
     try:
         resp = requests.get(url, timeout=15)
@@ -278,7 +299,21 @@ def _fetch_qq_a_share(symbol: str, market: str, days: int = 30) -> list:
                     pass
         return sorted(result, key=lambda x: x[0])
     except Exception as e:
-        logger.warning(f"[QQ] 获取 {market}{symbol} 失败: {e}")
+        logger.warning(f"[QQ] 获取 {market}{symbol} 失败({e})，试新浪兜底")
+        try:
+            s_url = (f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                     f"CN_MarketData.getKLineData?symbol={market}{symbol}&scale=240&ma=no&datalen={days}")
+            sd = requests.get(s_url, headers={"User-Agent": "Mozilla/5.0"},
+                              timeout=15, proxies={"http": None, "https": None}).json()
+            if isinstance(sd, list):
+                res = []
+                for x in sd:
+                    if x.get('day') and x.get('close'):
+                        res.append((x['day'], float(x['close'])))
+                if res:
+                    return sorted(res, key=lambda x: x[0])
+        except Exception as e2:
+            logger.error(f"新浪兜底 {market}{symbol} 也失败: {e2}")
         return []
 
 

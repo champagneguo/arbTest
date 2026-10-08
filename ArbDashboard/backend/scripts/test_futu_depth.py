@@ -5,10 +5,15 @@
 """
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'arbcore'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'ArbDashboard', 'backend'))
 
-from fetchers.futu_reader import FutuReader
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.normpath(os.path.join(_HERE, '..', '..', '..'))  # <LOFarb>/src
+# [AI-2026-10-07] 原写法 '..','src','arbcore' 解析为 backend/src/arbcore（不存在：项目已整体下移一层到 src/），
+# 导致本脚本 import 即失败。改为定位真正的 <LOFarb>/src。
+sys.path.insert(0, _SRC)
+sys.path.insert(0, os.path.join(_SRC, 'ArbDashboard', 'backend'))
+
+from arbcore.fetchers.futu_reader import FutuReader
 from services.market_data_service import MarketDataService
 import sqlite3
 from datetime import datetime
@@ -42,9 +47,9 @@ def main():
 
     # 需要后端估值服务
     from services.fund_service import FundService
-    from infrastructure.db_manager import DatabaseManager
+    from arbcore.database.db_manager import DatabaseManager
 
-    db = DatabaseManager('D:/Study/arbTest/database/arb_master.db')
+    db = DatabaseManager()  # 走 _resolve_db_path，主库唯一（勿再硬编码路径）
     svc = FundService(db)
 
     # 获取 162411 的估值元数据

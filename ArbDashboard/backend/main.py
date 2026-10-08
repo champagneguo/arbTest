@@ -60,7 +60,6 @@ from datetime import datetime
 # Setup logging
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_root = os.path.abspath(os.path.join(backend_dir, ".."))
-# [AI-2026-08-16] 日志统一到仓库外唯一根(本地 D:\Study\arbTest\logs / ARM 同理), 与 database 物理隔离同思路
 logs_dir = os.path.abspath(os.path.join(workspace_root, "..", "..", "logs"))
 
 START_TIME = time.time()  # 进程启动时刻，供 /api/status 计算运行时长
@@ -221,12 +220,32 @@ else:
 # 1. [V3.11 统一数据库路径]
 # [AI-2026-08-17] 用与 DatabaseManager 一致的 _resolve_db_path 定位项目根，
 #   根治 ARM 部署无 src/ 层导致 '../..' 算错、连到 /home/ubuntu/database 空库的 bug
-from arbcore.database.db_manager import _resolve_db_path
+from arbcore.database.db_manager import _resolve_db_path, check_master_db
 root_db_path = _resolve_db_path()
 # [AI-2026-08-16] 交易数据独立库：成交/配对/策略规则等敏感交易数据与市场因子分离，隐私保护
 tran_db_path = os.path.join(os.path.dirname(root_db_path), "arb_tran.db")
 logger.info(f"📂 Using database at {root_db_path}")
 logger.info(f"🔒 交易库 at {tran_db_path}")
+
+# [AI-2026-10-07] 主库自检（防呆）：必须跑在下方 DatabaseManager 实例化**之前** ——
+# 一旦路径解析失误，os.makedirs + sqlite3.connect（默认 READWRITE|CREATE）会先静默造出
+# 一个 0 字节空库，那时再自检就晚了。挡住两类事故：
+#   ① 主库文件缺失（目录搬迁 / ARB_MASTER_DB 未设 / 布局变化）
+#   ② 主库文件存在但为空库/错库 —— 后者是 10-06「分类标签全丢」的真实形态，
+#      文件被造出来后「存在」了，任何 os.path.exists 检查都会放行。
+# 默认 fail-fast 拒绝启动（空库跑起来 = 错的估值与溢价）；应急降级：设 ARB_DB_GUARD=warn 则仅告警。
+_db_ok, _db_problems = check_master_db(root_db_path)
+if _db_ok:
+    logger.info(f"✅ [DB-GUARD] 主库自检通过: {root_db_path}")
+else:
+    for _p in _db_problems:
+        logger.critical(f"🚨 [DB-GUARD] 主库自检失败: {_p}")
+    logger.critical(f"🚨 [DB-GUARD] 解析路径: {root_db_path}")
+    logger.critical("🚨 [DB-GUARD] 排查方向：ARB_MASTER_DB 环境变量 / _shared 布局 / 是否发生目录搬迁")
+    if os.environ.get("ARB_DB_GUARD", "").strip().lower() == "warn":
+        logger.critical("⚠️ [DB-GUARD] ARB_DB_GUARD=warn → 仅告警并继续启动（可能连到空库/错库，后果自负）")
+    else:
+        raise RuntimeError("主库自检失败，拒绝启动：" + "；".join(_db_problems))
 
 # Define project root (ArbDashboard directory)
 project_root = workspace_root
@@ -868,7 +887,42 @@ async def lifespan(app: FastAPI):
         market_data_service.ib_reader.stop_polling()
         market_data_service.ib_reader.disconnect_from_ib()
 
-app = FastAPI(title="ArbNext API", version="1.0.0", lifespan=lifespan)
+# [AI-2026-10-07] JSON 序列化兜底：把 NaN / +Inf / -Inf 递归转成 null 再交给序列化。
+#   根因：Starlette 的 JSONResponse.render 用 json.dumps(..., allow_nan=False)，
+#   返回体里只要有**任一非有限浮点**就抛
+#     ValueError: Out of range float values are not JSON compliant
+#   → 端点 500（且不打印 Python 栈，前端只见 "Internal Server Error"，极难定位）。
+#   真实来源：SQLite 的 NULL 列经 pandas 读出变 NaN（典型：/api/fund/<code>/intraday
+#   的 open_premium / close_premium / lof_bid1 / etf_bid1 等盘口列，未成交时段为空）。
+#   ⚠️ 这是**类型层面的根治**（一处生效、覆盖全部端点），而非逐个端点打补丁 ——
+#      未来任何返回 DataFrame/含 NaN 数据的端点都不会再因此 500。
+def _json_sanitize(_obj):
+    """把非有限浮点(NaN/±Inf)递归替换为 None，其余原样返回。"""
+    if isinstance(_obj, float):
+        # NaN 不等于自身；±Inf 用等值判断（不额外依赖 math 模块）
+        if _obj != _obj or _obj == float("inf") or _obj == float("-inf"):
+            return None
+        return _obj
+    if isinstance(_obj, dict):
+        return {_k: _json_sanitize(_v) for _k, _v in _obj.items()}
+    if isinstance(_obj, (list, tuple)):
+        return [_json_sanitize(_v) for _v in _obj]
+    return _obj
+
+
+class _SafeJSONResponse(JSONResponse):
+    """默认响应类：先清洗非有限浮点，再走标准 JSON 序列化。"""
+
+    def render(self, content) -> bytes:
+        return super().render(_json_sanitize(content))
+
+
+# [AI-2026-10-07] 云端看板节点关闭接口文档面（/docs /redoc /openapi.json）。
+#   本机（full 模式）保留，便于开发调试；ARM（DASHBOARD_MODE=1）一律 None ⇒ 404。
+_docs_kwargs = ({"docs_url": None, "redoc_url": None, "openapi_url": None}
+                if DASHBOARD_MODE else {})
+app = FastAPI(title="ArbNext API", version="1.0.0", lifespan=lifespan,
+              default_response_class=_SafeJSONResponse, **_docs_kwargs)
 
 # CORS Configuration
 app.add_middleware(
@@ -878,6 +932,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==============================================================
+# [AI-2026-10-07] 纵深防御：看板节点（DASHBOARD_MODE=1）在**后端**再拒一层私有/写端点。
+#   背景：nginx 是第一道（公网侧）；这里是第二道 —— 防「nginx 被误改 / 直连 8000 / 未来
+#   有人放开安全组」时私有端点裸奔。本机（full 模式）不生效，不影响东哥本地功能。
+#   ⚠️ 与 nginx 口径**必须一致**：/api/tokyo/admin、/api/tokyo/status、/api/tokyo/diff
+#      是「东京维护面板页面 + 其数据源」，**故意不入拦截名单**；只拦 POST /api/tokyo/repush。
+#      详见 server-docs/093_6 §11.1（东哥第 1 组纠正：tokyo 严禁整前缀封）。
+# ==============================================================
+_DASHBOARD_DENY_PREFIXES = (
+    "/api/db/", "/api/private/", "/api/ledger/", "/api/rule_engine/", "/api/config/",
+    "/api/system/", "/api/sync/", "/api/bond/", "/api/etf-rotation/",
+    "/api/trading/", "/api/penetration/", "/api/oil/",
+)
+_DASHBOARD_DENY_EXACT = {
+    "/api/tokyo/repush",
+    "/api/fund/sync-freeze", "/api/fund/sync-usa-etf",
+    "/api/fund/oil-refetch-prices", "/api/fund/oil-price-freshness",
+}
+# [AI-2026-10-08 东哥拍板·修复安全加固误伤] 移出 "/holding-recalc-detail"：
+# 该端点是**只读诊断**（返回各腿两日 ETF 收盘价/两日汇率原值/权重/前填标注），
+# 10-07 那批加固按"公开页 0 引用"把它与写端点一起封了，导致本机前端（full 模式）
+# 经 `_arm_api_via_ssh` 代理拿 ARM 时被 403 顶回（ARM 是 DASHBOARD_MODE）⇒
+# 持仓静态估值的展开明细**整片空白**、且「🔸沿用上一交易日收盘价」的前填警告一并消失。
+# 放开是安全的：① 它只读、无写；② 公网面由 nginx `arbmini.conf` 的 403 独立把守
+# （SSH 代理走 ARM 回环 8000，不经 nginx）⇒ 公网不可达、本机代理可达，各得其所。
+_DASHBOARD_DENY_FUND_SUFFIX = (
+    "/basket", "/history", "/holdings", "/holding-periods", "/holding-valuation",
+    "/holding-realtime", "/hedge-exposure", "/valuation_meta",
+    "/reconcile_static_val", "/sync-oil-static",
+)
+
+
+def _is_dashboard_denied(path: str) -> bool:
+    """True = 该路径在 DASHBOARD_MODE 下应被后端拒绝。"""
+    if not DASHBOARD_MODE:
+        return False
+    if path in _DASHBOARD_DENY_EXACT:
+        return True
+    for _p in _DASHBOARD_DENY_PREFIXES:
+        if path.startswith(_p):
+            return True
+    if path.startswith("/api/fund/") and path.endswith(_DASHBOARD_DENY_FUND_SUFFIX):
+        return True
+    return False
+
+
+@app.middleware("http")
+async def _dashboard_guard(request: Request, call_next):
+    if _is_dashboard_denied(request.url.path):
+        logger.warning(f"[DASHBOARD_GUARD] 拒绝 {request.method} {request.url.path}")
+        return JSONResponse(status_code=403, content={
+            "status": "error", "message": "此端点在云端看板节点（DASHBOARD_MODE）已被禁用"})
+    return await call_next(request)
 
 # [AI-2026-07-25] 已删除 /api/health 健康检查端点（方案C：该健康检查功能无调用方，华而不实）
 
@@ -1048,13 +1156,68 @@ async def get_market():
     except Exception as e:
         logger.error(f"Market Overview Error: {e}")
         return {"status": "error", "message": str(e)}
-async def get_market():
+
+# [AI-2026-10-06] 主看板顶部「环球市场概览」条（同类概览条概念，自有实现）。
+# 新浪外盘期货 hf_ 一把抓：黄金/白银/WTI + 标普500/纳斯达克100/日经225（东哥拍板：道琼斯不要）。
+# 只返回 最新价+涨跌幅（昨结为基准），不带"收盘/行情/行情时间"等冗余字段。
+# 60s 内存缓存：前端随 fetchData 轮询也只打新浪一分钟一次；抓取失败回退旧缓存，绝不出假值（缺字段直接跳过）。
+_GLOBAL_OVERVIEW_SYMBOLS = [
+    ("commodity", "黄金",        "hf_GC"),
+    ("commodity", "白银",        "hf_SI"),
+    ("commodity", "WTI原油",     "hf_CL"),
+    ("futures",   "标普500",     "hf_ES"),
+    ("futures",   "纳斯达克100", "hf_NQ"),
+    ("futures",   "日经225",     "hf_NK"),
+]
+_GLOBAL_OVERVIEW_CACHE: dict = {"ts": 0.0, "data": []}
+
+@app.get("/api/market/global-overview")
+async def get_global_overview():
+    import requests as _requests
+    now = time.time()
+    if _GLOBAL_OVERVIEW_CACHE["data"] and now - _GLOBAL_OVERVIEW_CACHE["ts"] < 60:
+        return {"status": "ok", "data": _GLOBAL_OVERVIEW_CACHE["data"]}
+    symbols = ",".join(s for _, _, s in _GLOBAL_OVERVIEW_SYMBOLS)
     try:
-        data = fund_service.get_market_overview(market_data_service=market_data_service)
-        return {"status": "ok", "data": data}
+        resp = _requests.get(
+            f"http://hq.sinajs.cn/list={symbols}",
+            headers={"Referer": "https://finance.sina.com.cn/"},
+            timeout=8, verify=False, proxies={"http": None, "https": None},
+        )
+        resp.encoding = "gbk"
+        raw: dict = {}
+        for line in resp.text.strip().split("\n"):
+            if "=" not in line or '"' not in line:
+                continue
+            # [AI-2026-10-06 修] 行形如 var hq_str_hf_GC="..."；按"_"切[-1]只会得到"GC"，
+            # 必须按 hq_str_ 前缀切，键才是完整的 hf_GC（修复后首版解析全空 bug）
+            key = line.split("=")[0].split("hq_str_")[-1].strip()
+            raw[key] = line.split('"')[1].split(",")
+        items = []
+        for group, name, sym in _GLOBAL_OVERVIEW_SYMBOLS:
+            parts = raw.get(sym) or []
+            # hf_ 字段（新浪外盘期货）：parts[0]=最新价，parts[7]=昨结算 → 涨跌幅基准
+            if len(parts) < 8:
+                continue
+            try:
+                price = float(parts[0])
+                base = float(parts[7])
+            except (ValueError, TypeError):
+                continue
+            if price <= 0 or base <= 0:
+                continue
+            items.append({
+                "group": group,
+                "name": name,
+                "symbol": sym,
+                "price": price,
+                "change_pct": round((price / base - 1) * 100, 2),
+            })
+        if items:
+            _GLOBAL_OVERVIEW_CACHE.update(ts=now, data=items)
     except Exception as e:
-        logger.error(f"Market Overview Error: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"global-overview 抓取失败（回退旧缓存）: {e}")
+    return {"status": "ok", "data": _GLOBAL_OVERVIEW_CACHE["data"]}
 
 @app.get("/api/system/milestones")
 async def get_system_milestones():
@@ -1229,7 +1392,7 @@ def _is_arm() -> bool:
 
     [AI-2026-09-23 B方案] 同源代码在 ARM 与本机各跑一份：持仓静态估值改由 ARM 自算，
     故本机端点需 SSH 代理到 ARM；但 ARM 机器上的端点若也走 SSH 代理会试图连回自己(无 arm 别名)而失败。
-    以数据库路径区分：ARM 库在 ~/arbtest/（POSIX 路径），本机在 Windows D:\\Study\\arbTest\\。
+    以数据库路径区分：ARM 库在 /home/ubuntu/（POSIX 路径），本机在 Windows（如 D:/Study/ARB/_shared/）。
     """
     return "/home/ubuntu" in root_db_path or root_db_path.startswith("/home")
 
@@ -2143,7 +2306,11 @@ def _resolve_hedge_for_order(fund_code, underlying_symbol):
         )
         nav = float(nav_df.iloc[0]['nav']) if not nav_df.empty else None  # [AI-2026-08-07] 缺失即 None
         fx_df = pd.read_sql(
-            "SELECT usd_cny_mid FROM exchange_rate ORDER BY date DESC LIMIT 1", conn2
+            # [AI-2026-10-07] 加 IS NOT NULL：节假日最新一行 mid 为 NULL，
+            #   原写法 float(None) 抛 TypeError → 整函数失败 → 下单被误判为"hedge 不足"拒绝。
+            #   与 fund_service.get_valuation_meta / sampler_service 同口径：取最近一次已公布中间价。
+            "SELECT usd_cny_mid FROM exchange_rate "
+            "WHERE usd_cny_mid IS NOT NULL ORDER BY date DESC LIMIT 1", conn2
         )
         fx = float(fx_df.iloc[0]['usd_cny_mid']) if not fx_df.empty else None  # [AI-2026-08-07] 缺失即 None，禁止 7.25 假常量
         # hedge = (ETF基价 * 汇率) / (净值 * 仓位)
@@ -3365,7 +3532,10 @@ async def trigger_task(task: str):
     import subprocess
     # [AI-2026-06-28] 修复净值补采500错误：daily_updater.py 实际在 scheduler/ 下，不在 arbcore/scripts/
     scripts_dir = os.path.normpath(os.path.join(backend_dir, "scheduler"))
-    lofarb_dir = os.path.normpath(os.path.join(backend_dir, "..", "..", "LOFarb"))
+    # [AI-2026-10-07] 修正：搬入 src/ 后 backend_dir=<repo>/src/ArbDashboard/backend，
+    #   仓库根是上溯 3 层（原 "..","..","LOFarb" 会算成 <repo>/src/LOFarb，不存在）。
+    #   注：该变量当前未被引用（历史遗留），保留但改对，避免将来误用。
+    lofarb_dir = os.path.normpath(os.path.join(backend_dir, "..", "..", ".."))
     task_map = {
         "011": os.path.join(scripts_dir, "daily_updater.py"),
         "012": [os.path.join(scripts_dir, "daily_updater.py"), "--static-valuation"],
@@ -4244,5 +4414,9 @@ if __name__ == "__main__":
     # [AI-2026-08-24] 无条件清理端口：无论从哪里启动（start_dashboard.bat/runback.bat/手动），
     # 都确保不会有两个后端实例同时竞争 8000 端口。
     kill_port_owner(8000)
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", access_log=False)
+    # [AI-2026-10-07] 监听地址可由环境变量覆盖：默认 0.0.0.0（本机开发机行为不变）；
+    # ARM 生产环境在 arb-dashboard.service 里设 ARBDASH_BIND_HOST=127.0.0.1，
+    # 只挂回环 lo ⇒ 即使 Oracle 安全组误开，8000 也不会暴露到公网。
+    _bind_host = (os.environ.get("ARBDASH_BIND_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+    uvicorn.run(app, host=_bind_host, port=8000, log_level="info", access_log=False)
 

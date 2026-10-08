@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional
 # [AI-2026-07-27] calculate() 直调统一估值核心，不再经 valuation_math 间接
 from .unified_valuation import basket_valuation
 from .valuation_data_engine import assemble_dynamic_components
+from arbcore.analysis.common import EUR_FUND_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,9 @@ class DynamicValuationCalculator:
                 conn, params=(fund_code,)
             )
             category_fx = str(cat_df.iloc[0]['category']).strip() if not cat_df.empty else ''
-            fx_col = 'jpy_cny_mid' if category_fx == 'QDII日本' else 'usd_cny_mid'
+            fx_col = ('eur_cny_mid' if fund_code in EUR_FUND_CODES
+                      else 'jpy_cny_mid' if category_fx == 'QDII日本'
+                      else 'usd_cny_mid')
             category = category_fx  # 复用
 
             # ── 第一步：独立取各数据源最新值 ──────────────────────────────

@@ -7,16 +7,31 @@ import os
 from typing import Dict, List, Any
 from collections import defaultdict
 
-# 路径配置：从 services/ 往上5层到项目根，再到 database/
+# 路径配置：[AI-2026-10-06] 搬入 src/ 后目录层数全变，写死路径会命中空库。
+# 统一走 arbcore 的 _resolve_db_path（env ARB_MASTER_DB 优先 → _shared 回退 → database/ 上溯），与 db_manager 同源。
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(BACKEND_DIR))))
-DB_PATH = os.path.join(PROJECT_ROOT, "database", "arb_master.db")
-YAML_PATH = os.path.join(PROJECT_ROOT, "src", "arbcore", "config", "lof_config.yaml")
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)  # 兜底用：ArbDashboard 根
+
+
+def _get_db_path() -> str:
+    try:
+        from arbcore.database.db_manager import _resolve_db_path
+        return _resolve_db_path()
+    except Exception:
+        return os.path.join(PROJECT_ROOT, "database", "arb_master.db")
+
+
+def _get_yaml_path() -> str:
+    try:
+        import arbcore
+        return os.path.join(os.path.dirname(arbcore.__file__), "config", "lof_config.yaml")
+    except Exception:
+        return os.path.join(PROJECT_ROOT, "arbcore", "config", "lof_config.yaml")
 
 
 def get_fund_holdings(fund_code: str, period: str) -> List[Dict[str, Any]]:
     """从DB读取指定基金的季报持仓"""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_get_db_path())
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     
@@ -33,7 +48,7 @@ def get_fund_holdings(fund_code: str, period: str) -> List[Dict[str, Any]]:
 
 def load_penetration_rules() -> Dict[str, Any]:
     """从yaml加载穿透规则"""
-    with open(YAML_PATH, 'r', encoding='utf-8') as f:
+    with open(_get_yaml_path(), 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
     return cfg.get('penetration_rules', {})
 

@@ -48,11 +48,12 @@ MIN_COVERAGE = 0.90
 # 含 JPY/HKD 篮子（501018 的 1699/1671、161129 的 03175）必须用对应汇率，否则误差系统性偏大。
 FX_MODE = "by_currency"
 
-# 币种 -> exchange_rate 列名（GBP/EUR 暂无列，缺则退化为 USD 并告警）
+# 币种 -> exchange_rate 列名（GBP 暂无列，缺则退化为 USD 并告警）
 CURRENCY_FX_COL: Dict[str, str] = {
     "USD": "usd_cny_mid",
     "JPY": "jpy_cny_mid",
     "HKD": "hkd_cny_mid",
+    "EUR": "eur_cny_mid",
 }
 
 # 4) 前填标注：区分"真实休市前填 ✅"与"非假期数据缺失前填 ⚠️"。
@@ -86,6 +87,9 @@ MARKET_HOLIDAYS: Dict[str, set] = {
     "HK": {
         "2026-01-01", "2026-02-17", "2026-02-18", "2026-02-19",
         "2026-04-03", "2026-04-06", "2026-04-07", "2026-05-01",
+        # [AI-2026-10-08] 佛诞（农历四月初八 = 2026-05-24）适逢周日 ⇒ 翌日 5-25 补假。
+        # 原表漏列，03175（上市 HK）在该日无价被判成"⚠️非假期缺价"（假报警）。
+        "2026-05-25",
         "2026-06-19", "2026-07-01", "2026-09-25", "2026-10-01",
         "2026-10-26", "2026-12-25", "2026-12-26", "2026-12-28",
     },
@@ -153,7 +157,7 @@ def _last_trading_day(symbol: str, on_or_before: str, max_back: int = 20) -> Opt
 
 _SINA_US_DAILY_URL = ("https://stock.finance.sina.com.cn/usstock/api/jsonp.php/var%20_/"
                       "US_MinKService.getDailyK?symbol={sym}&___qn=3")
-_TENCENT_KLINE_URL = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+_TENCENT_KLINE_URL = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get?"
                       "param={code},day,,,10,qfq")
 
 
@@ -196,24 +200,60 @@ def _sina_us_daily_closes(symbol: str) -> Dict[str, float]:
 
 def _tencent_daily_closes(code: str) -> Dict[str, float]:
     """腾讯日K最近收盘（{date: close}）。
-    code 形如 ukCRUD / hk03175。伦敦 ukXXX 必须走 usfqkline 端点（裸 fqkline
-    对 uk 只回当天盘中 1 行；ukfqkline 返回空）——与 fetch_oil_etf_history.py
-    tx_kline 默认 kind='us' 的既有用法一致。港股走裸 fqkline。"""
+    [BUG-2026-10-06-05] 腾讯 K 线被 WAF 拦截：腾讯失败按市场兜底——
+    港股 hkXXX → 东财（免费端仅返回日期，实际降级为空，依赖 ARM sampler）；
+    美股 → 新浪 US_MinKService（_sina_us_daily_closes 已存在）；
+    伦敦 ukXXX → 腾讯 usfqkline（ifzq.gtimg.cn 全路径 200，含本机住宅网络）。
+        ⚠️ 注意：伦敦走 usfqkline，不是 txfqkline（后者 controller 已下架，死端点）。"""
     import json
-    path = "usfqkline" if code.startswith("uk") else "fqkline"
-    raw = _http_get_text(
-        f"https://web.ifzq.gtimg.cn/appstock/app/{path}/get?param={code},day,,,10,qfq")
-    obj = json.loads(raw)
-    node = (obj.get("data") or {}).get(code) or {}
-    days = node.get("day") or node.get("qfqday") or []
-    out: Dict[str, float] = {}
-    for d in days:
-        if isinstance(d, (list, tuple)) and len(d) >= 3 and d[0]:
-            try:
-                out[str(d[0])] = float(d[2])
-            except (TypeError, ValueError):
-                continue
-    return out
+    try:
+        path = "usfqkline" if code.startswith("uk") else "fqkline"
+        raw = _http_get_text(
+            f"https://ifzq.gtimg.cn/appstock/app/{path}/get?param={code},day,,,10,qfq")
+        obj = json.loads(raw)
+        node = (obj.get("data") or {}).get(code) or {}
+        days = node.get("day") or node.get("qfqday") or []
+        out: Dict[str, float] = {}
+        for d in days:
+            if isinstance(d, (list, tuple)) and len(d) >= 3 and d[0]:
+                try:
+                    out[str(d[0])] = float(d[2])
+                except (TypeError, ValueError):
+                    continue
+        if out:
+            return out
+        raise RuntimeError("腾讯返回空")
+    except Exception as e:
+        logger.warning(f"[holding] 腾讯 {code} 失败({e})，按市场兜底")
+        if code.startswith("hk"):
+            return _eastmoney_hk_daily_closes(code[2:])   # 东财港股兜底（降级）
+        if code.startswith(("us", "gb")) or not code[0].isdigit():
+            return _sina_us_daily_closes(code)            # 美股新浪兜底
+        return {}                                          # 伦敦 ukXXX 无免费源
+
+
+def _eastmoney_hk_daily_closes(hk_code: str) -> Dict[str, float]:
+    """[BUG-2026-10-06-05] 东财港股兜底。免费端 kline 仅返回日期无 OHLC，
+    故通常返回空 dict（优雅降级，不刷屏）；若东财恢复完整数据则自动生效。"""
+    try:
+        secid = f"116.{hk_code}" if (len(hk_code) == 5 and hk_code.isdigit()) else f"100.{hk_code}"
+        em_url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}"
+                  f"&ut=fa5fd1947f08e6d3cb8d1e3a8a3c7b2e&fields1=f1f1f2&fields2=f51f52f53f54f55f56"
+                  f"&klt=101&fqt=0&end=20500101&lmt=10")
+        txt = _http_get_text(em_url)
+        em = json.loads(txt)
+        kl = (em.get("data") or {}).get("klines") or []
+        out: Dict[str, float] = {}
+        for row in kl:
+            parts = row.split(",")
+            if len(parts) >= 3 and parts[0] and parts[2]:
+                try:
+                    out[parts[0]] = float(parts[2])
+                except (TypeError, ValueError):
+                    continue
+        return out
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +859,9 @@ class HoldingService:
             return d[keys[-1]] if keys else None
 
         rows = []
+        # [AI-2026-10-08 东哥拍板·宁缺毋假收口] 被拦下的日期（非假期缺价，见下方拦截分支），
+        # 与 pending_dates 合并进返回的 pending，供前端灰色「待补」占位。
+        blocked_dates: List[Dict[str, Any]] = []
         stat: Dict[str, Dict[str, float]] = {}
         prev_nav = None
         # [AI-2026-09-28 锚点错配修复，东哥拍板方案A] prev_nav_date = 基数 prev_nav 所对应的
@@ -856,6 +899,48 @@ class HoldingService:
             if any(p0[s] is None or p1[s] is None or p0[s] <= 0 for s in syms):
                 prev_nav = nav
                 prev_nav_date = d if nav is not None else None
+                continue
+
+            # 前填标注：区分"真实休市前填 ✅"与"非假期数据缺失前填 ⚠️"（东哥 2026-09-12 立规）。
+            # 缺价的日期可能是 prev_date(T-1) 或 d(T 日)，分别按该标的市场判断是否真休市。
+            # 判定**前置**到计算之前：非假期缺价要整行拦掉，不能等算完再判。
+            note_parts: List[str] = []
+            fill_warning = False
+            for s in syms:
+                miss_dates = [dt for dt in (prev_date, d) if dt not in price_rows[s]]
+                for md in miss_dates:
+                    if is_market_holiday(s, md):
+                        note_parts.append(f"假期前填:{s}({md})")
+                    else:
+                        note_parts.append(f"⚠️非假期缺价:{s}({md})")
+                        fill_warning = True
+
+            # [AI-2026-10-08 东哥拍板·「腿价齐再算」] 非假期缺价 ⇒ 该行**不生成、不落库**。
+            #
+            # 原行为：_fill 前填一个"僵死价格"参与加权，照常落库，仅以 fill_warning 做展示标记。
+            # 这与「宁缺毋假」铁律相悖，实证代价：2026-10-06 160723 = 2.270211 ——
+            #   USO 当日(10-06)价在源里尚未出现（10-07 07:30 采样日志：USO 本地末条仍是
+            #   10-05/143.99），08:05 的清晨刷新便前填 10-05 价算出该行；而同期 CRUD/BRNT
+            #   （伦敦腿）当日是大跌的 —— 于是出现了"USO 明明涨、估值却跌"的自相矛盾，
+            #   且要等下一次全量重算才可能被覆盖。完整数据应为 2.272917。
+            #
+            # 现改为：整行跳过（既不 append 到 rows、也不推进 prev_nav 的**取值**），
+            # 同时登记到 blocked_dates ⇒ 前端以灰色「待补」行占位。
+            # 代价是"少一行"，但原因可见；远胜留一行伪值误导核对。
+            # 边界：**假期前填仍合法**（is_market_holiday 为真），该分支不受影响。
+            if fill_warning:
+                blocked_dates.append({
+                    "date": d,
+                    "report_period": per["period"],
+                    "official_nav": round(nav, 6) if nav is not None else None,
+                    "us_clock": us_clock,
+                    "reason": "leg_price_missing",
+                    "note": "; ".join(note_parts),
+                    "message": "底层标的当日缺价（非假期），按「宁缺毋假」未生成估值",
+                })
+                if nav is not None:
+                    prev_nav = nav
+                    prev_nav_date = d
                 continue
             # 逐标的 FX：本地涨跌 × 该币种汇率涨跌，再按权重加权成 r_basket。
             # 纯 USD 篮子（160723/161129 五只）每标的使用 usd_cny_mid，与旧口径数值一致；
@@ -895,20 +980,9 @@ class HoldingService:
             # 当日官方净值缺失(T+1未公布)时估值仍可算(依赖上一非空净值)，但误差无法计算
             err = (est / nav - 1.0) if nav is not None else None
 
-            # 前填标注：区分"真实休市前填 ✅"与"非假期数据缺失前填 ⚠️"（东哥 2026-09-12 立规）。
-            # 缺价的日期可能是 prev_date(T-1) 或 d(T 日)，分别按该标的市场判断是否真休市。
-            note_parts: List[str] = []
-            fill_warning = False
-            for s in syms:
-                miss_dates = [dt for dt in (prev_date, d) if dt not in price_rows[s]]
-                for md in miss_dates:
-                    if is_market_holiday(s, md):
-                        note_parts.append(f"假期前填:{s}({md})")
-                    else:
-                        note_parts.append(f"⚠️非假期缺价:{s}({md})")
-                        fill_warning = True
             # [AI-2026-09-22] 前填/沿用提示：标的在 T 日(d)无价即视为"沿用上一交易日收盘价"，
             # 与是否假期无关；区别于 fill_warning(非假期缺价=真缺数据)。供前端琥珀色提醒用户。
+            # （note_parts / fill_warning 已前置到本行之前算出；走到这里 fill_warning 必为 False。）
             carried_symbols = [s for s in syms if d not in price_rows.get(s, {})]
             carried_forward = len(carried_symbols) > 0
             usd_ref = _fill(fx_rows["usd_cny_mid"], d)
@@ -969,11 +1043,19 @@ class HoldingService:
         # 时由 _fill 前填到最近交易日，估值仍是合理预测(东哥口径"静态估值即预测")，不应因此变 NULL；
         # note 字段透明标注"假期前填:SYM(日期)"或"⚠️非假期缺价:SYM(日期)"，fill_warning 标记
         # 非假期缺价行供前端标红核实。真正的低覆盖/大面积缺口日仍被 cov_gate 挡掉。
+        # [AI-2026-10-08 东哥拍板·清零范围收窄] 原为 `WHERE fund_code=?` **无条件清全表**：
+        # 调用方传入的 start 不同（定时任务 2026-01-01 / 前端 detail 2026-07-01），
+        # 而 rows 只覆盖 start 之后 ⇒ start 之前的 hsv 被清光且不会被重写回来。
+        # 危害：`/holding-recalc-detail` 用的是 start=2026-07-01 —— 一旦该端点恢复可用
+        # （本轮 Bug 1 修复），用户每打开一次持仓分析页就会**清掉 ARM 库 1~6 月的 hsv**。
+        # 与"全量重算"的语义对齐：清零范围必须 = rows 可覆盖的范围 = start 之后。
+        # （完整历史由每日 08:05 `_step_oil_recalc`(start=2026-01-01) 负责全量重写。）
         conn = self._get_conn()
         try:
             conn.execute(
-                "UPDATE unified_fund_history SET holding_static_val=NULL WHERE fund_code=?",
-                (fund_code,),
+                "UPDATE unified_fund_history SET holding_static_val=NULL "
+                "WHERE fund_code=? AND date>=?",
+                (fund_code, start),
             )
             for r in rows:
                 if r["coverage"] >= cov_gate:
@@ -1011,21 +1093,32 @@ class HoldingService:
                 for p in periods
             ],
             "rows": list(reversed(rows)),  # 降序：最新在上
-            "pending": list(reversed(pending_dates)),  # 降序：美股价未入库的待补日
+            # 降序：待补日 = ①美股价未入库（原有 A 方案语义）+ ②非假期缺价被拦（本轮新增）。
+            "pending": sorted(
+                list(pending_dates) + blocked_dates,
+                key=lambda x: x["date"], reverse=True,
+            ),
         }
 
     def _us_price_pending_dates(
         self, conn, fund_code: str, start: str, us_clock: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """[AI-2026-09-24 方案A] 因「美股价未入库」而未生成静态估值的交易日（只读，不落库）。
+        """[AI-2026-09-24 方案A] 静态估值为空、但按行挂靠本应有值的交易日（只读，不落库）。
 
-        口径与 get_recalc_history 的 us_clock 拦截严格一致，不另立规则：
-        该日有官方净值(nav 非空) + 该日静态估值仍为空 + 日期 > 美股时钟(SPY/QQQ 最新已入库收盘日)
-        + 该日非美股假期。
+        两类待补，按能否归因拆 reason：
+        - `us_price_pending`：日期 > 美股时钟(SPY/QQQ 最新已入库收盘日) 且非美股假期
+          ⇒ 美股价尚未入库（原 A 方案语义，与 get_recalc_history 的 us_clock 拦截同口径）。
+        - `leg_price_missing`：其余空白日 ⇒ 底层标的当日缺价（非假期），被「腿价齐再算」
+          规则拦下未落库（[AI-2026-10-08] 见 get_recalc_history 内注释）。
 
-        这些日在重算时被整行跳过（宁缺毋假，东哥 2026-09-15 拍板），因此读库表格会"少一行"，
-        用户第一反应是"程序丢行了"。本方法把它们显式列出，供前端以灰色「待补」行占位 ——
-        既保留"不生成假估值"的红线，又让"哪天缺、为什么缺"一眼可见。
+        这些日在重算时被整行跳过（宁缺毋假，东哥 2026-09-15 / 2026-10-08 拍板），
+        因此读库表格会"少一行"，用户第一反应是"程序丢行了"。本方法把它们显式列出，
+        供前端以灰色「待补」行占位 —— 既保留"不生成假估值"的红线，又让"哪天缺、为什么缺"一眼可见。
+
+        [AI-2026-10-08 东哥拍板·判据放宽] 原判据要求 `nav IS NOT NULL`（源自"有净值才谈得上
+        待补"），但 QDII 的 T+1 净值常整段为空（160723 自 2026-09-30 起 nav 全为 NULL），
+        该判据下 pending **恒为空** —— 一旦静态估值因缺价被拦，前端既少一行又无任何提示。
+        现改为「库里 hsv 为空即待补」，再按上述两类归因。
         """
         if us_clock is None:
             us_clock_row = conn.execute(
@@ -1033,25 +1126,42 @@ class HoldingService:
                 "WHERE symbol IN ('SPY','QQQ') AND price IS NOT NULL AND price>0"
             ).fetchone()
             us_clock = us_clock_row[0] if us_clock_row else None
-        if not us_clock:
-            return []
-        nav_rows = conn.execute(
+        hsv_null_rows = conn.execute(
             "SELECT date, nav FROM unified_fund_history "
-            "WHERE fund_code=? AND date>=? AND nav IS NOT NULL "
-            "AND holding_static_val IS NULL ORDER BY date",
+            "WHERE fund_code=? AND date>=? AND holding_static_val IS NULL ORDER BY date",
             (fund_code, start),
         ).fetchall()
-        return [
-            {
-                "date": d,
-                "official_nav": round(nav, 6) if nav is not None else None,
-                "us_clock": us_clock,
-                "reason": "us_price_pending",
-                "message": f"美股价未入库（美股时钟 {us_clock}），该行待补",
-            }
-            for d, nav in nav_rows
-            if d > us_clock and not is_market_holiday("USO", d)
-        ]
+        # [AI-2026-10-08] 起点边界过滤：`get_recalc_history(start=D)` 需要 D 的**前一交易日**
+        # 收盘价，但 price_rows 只从 start 起取 ⇒ D 当天天然算不出（prev 价取不到）。
+        # 这类"起点边界空行"是查询口径的产物、不是数据缺口，不得当作待补（否则前端
+        # 每次加载都会多出一行无意义的灰行）。判据：早于该基金首个 hsv 非空日的空行跳过。
+        _hsv_min_row = conn.execute(
+            "SELECT MIN(date) FROM unified_fund_history "
+            "WHERE fund_code=? AND date>=? AND holding_static_val IS NOT NULL",
+            (fund_code, start),
+        ).fetchone()
+        hsv_min = _hsv_min_row[0] if _hsv_min_row else None
+        out: List[Dict[str, Any]] = []
+        for d, nav in hsv_null_rows:
+            if hsv_min and d < hsv_min:
+                continue
+            if us_clock and d > us_clock and not is_market_holiday("USO", d):
+                out.append({
+                    "date": d,
+                    "official_nav": round(nav, 6) if nav is not None else None,
+                    "us_clock": us_clock,
+                    "reason": "us_price_pending",
+                    "message": f"美股价未入库（美股时钟 {us_clock}），该行待补",
+                })
+            else:
+                out.append({
+                    "date": d,
+                    "official_nav": round(nav, 6) if nav is not None else None,
+                    "us_clock": us_clock,
+                    "reason": "leg_price_missing",
+                    "message": "底层标的当日缺价（非假期），按「宁缺毋假」未生成估值",
+                })
+        return out
 
     def get_local_static_valuation_rows(self, fund_code: str, start: str = "2026-01-01") -> Dict[str, Any]:
         """[AI-2026-09-23 B方案·本地缓存读取] 读本地 unified_fund_history 的 date / nav / holding_static_val。
@@ -2253,7 +2363,11 @@ print(json.dumps({'updated': len(rows), 'total': tot[0], 'max_date': tot[1]}))
         remote = (
             'import sqlite3, json\n'
             'con = sqlite3.connect("/home/ubuntu/arbtest/database/arb_master.db")\n'
-            'rows = con.execute("SELECT fund_code, date, holding_static_val FROM unified_fund_history WHERE fund_code IN (\'160723\',\'161129\',\'501018\') AND holding_static_val IS NOT NULL").fetchall()\n'
+            # [AI-2026-10-08 东哥拍板] 去掉 AND holding_static_val IS NOT NULL：
+            # ARM 端「非假期缺价」被拦的行会由"有值"变 NULL，若只拉非空值，
+            # 本机会永久保留那个前填假值，与 ARM 权威源分叉（实证 10-06 160723）。
+            # 拉全量（含 NULL），upsert 时写回 NULL 即完成对齐；ARM 未剪枝的老行不受影响。
+            'rows = con.execute("SELECT fund_code, date, holding_static_val FROM unified_fund_history WHERE fund_code IN (\'160723\',\'161129\',\'501018\')").fetchall()\n'
             'print(json.dumps(rows))\n'
         )
         try:

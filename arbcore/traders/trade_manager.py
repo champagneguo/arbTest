@@ -6,11 +6,14 @@ import struct
 import threading
 import json
 
-# Ensure LOFarb directory is in sys.path so we can find account_private.py when imported from elsewhere
+# Ensure the directory holding account_private.py is on sys.path (fallback for `import account_private`)
+# [AI-2026-10-07] 原写死 "../../LOFarb"（旧布局遗留）：代码搬入 src/ 后算成 <repo>/src/LOFarb
+#   ——该目录不存在，os.path.exists 判否 → 整段静默失效（下面 `from account_private import ...`
+#   兜底永远走不通）。account_private.py 实际在 arbcore/config/ 下，直接指向它所在目录。
 _tm_dir = os.path.dirname(os.path.abspath(__file__))
-_lof_dir = os.path.normpath(os.path.join(_tm_dir, "..", "..", "LOFarb"))
-if os.path.exists(_lof_dir) and _lof_dir not in sys.path:
-    sys.path.append(_lof_dir)
+_cfg_dir = os.path.normpath(os.path.join(_tm_dir, "..", "config"))
+if os.path.exists(_cfg_dir) and _cfg_dir not in sys.path:
+    sys.path.append(_cfg_dir)
 
 import logging
 logger = logging.getLogger(__name__)

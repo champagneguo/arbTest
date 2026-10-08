@@ -53,7 +53,6 @@ N_DAYS = 800          # 抓取天数（腾讯伦敦实测可到 1000+，新浪�
 
 # 输出固定到项目根 oil_160723/（与东哥核对过的权威数据区一致），不依赖运行时 cwd
 # 脚本路径：src/ArbDashboard/backend/holding_valuation/fetch_oil_etf_history.py
-# 上溯 4 级 -> D:/Study/arbTest
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 OUT_CSV = os.path.join(_PROJECT_ROOT, 'oil_160723', 'all6.csv')
@@ -78,15 +77,22 @@ def _get(url, enc='utf-8', referer=None, data=None, timeout=25, retry=3):
 
 # ------------------------------------------------------------------ 伦敦（腾讯）
 def tx_kline(code, kind='us', n=N_DAYS):
-    """腾讯日K。伦敦 ukXXX 可给约 1000 天历史；美股 usXXX 只给最新 1 天，别用它取历史"""
-    u = ('https://web.ifzq.gtimg.cn/appstock/app/%sfqkline/get'
-         '?param=%s,day,,,%d,qfq' % (kind, code, n))
-    j = json.loads(_get(u, referer='https://gu.qq.com/'))
-    d = j['data'][code]
-    k = d.get('qfqday') or d.get('day')
-    if not k:
+    """腾讯日K。伦敦 ukXXX 可给约 1000 天历史；美股 usXXX 只给最新 1 天，别用它取历史。
+    [BUG-2026-10-06-05/+08] 腾讯 K 线曾因 web.ifzq.gtimg.cn 前端主机 WAF 失败；已统一改
+    ifzq.gtimg.cn 复活（A股/港股/伦敦/美股全 200，含本机）。失败仍返 {}（兜底保留）。"""
+    try:
+        u = ('https://ifzq.gtimg.cn/appstock/app/%sfqkline/get'
+             '?param=%s,day,,,%d,qfq' % (kind, code, n))
+        j = json.loads(_get(u, referer='https://gu.qq.com/'))
+        d = j['data'][code]
+        k = d.get('qfqday') or d.get('day')
+        if not k:
+            return {}
+        return {x[0]: float(x[2]) for x in k}      # x = [date, open, close, high, low, ...]
+    except Exception as e:
+        import logging
+        logging.getLogger("oil").warning(f"[oil] 腾讯 {code} 失败({e})，无免费兜底源")
         return {}
-    return {x[0]: float(x[2]) for x in k}      # x = [date, open, close, high, low, ...]
 
 
 # ------------------------------------------------------------------ 美股（新浪）

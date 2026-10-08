@@ -98,6 +98,30 @@ export const useFundStore = defineStore('fund', () => {
   const watchlist = ref<string[]>(savedWatchlist)
 
   // ---- getters ----
+  /** [AI-2026-10-07] QDII欧美固定排序（东哥指定分组顺序，便于同组比较）。
+   *  不在表内的基金（如未入库的 513519）自动落末尾，不影响其他 TAB。 */
+  const QDII_OUMEI_FIXED_ORDER: Record<string, number> = {
+    '162411': 1,  // 华宝油气
+    '513350': 2,  // 标普油气ETF富国
+    '159518': 3,  // 标普油气ETF嘉实（油气组，东哥原清单笔误 513519→159518）
+    '161125': 4,  // 易方达标普500
+    '161126': 5,  // 标普医疗保健
+    '161127': 6,  // 标普生物科技
+    '159502': 7,  // 标普生物科技ETF嘉实
+    '161128': 8,  // 标普信息科技
+    '161130': 9,  // 易方达纳100（东哥指定移至 161128 之下）
+    '162415': 10, // 美国消费
+    '164824': 11, // 交银印度
+    '164906': 12, // 交银中证海外
+    '513030': 13, // 德国ETF华安
+    '159561': 14, // 德国ETF嘉实
+    '513080': 15, // 法国ETF华安
+    '501300': 16, // 海富通美元债
+    '160644': 17, // 港美互联网
+    '501225': 18, // 顺丰半导体芯片
+    '501312': 19, // 海外科技
+  }
+
   /** 按当前 TAB + 搜索关键词过滤后的数据 */
   const filteredTableData = computed(() => {
     let data = tableData.value || []
@@ -116,6 +140,16 @@ export const useFundStore = defineStore('fund', () => {
           (item.fund_code || '').toLowerCase().includes(kw) ||
           (item.fund_name || '').toLowerCase().includes(kw)
       )
+    }
+
+    // [AI-2026-10-07] QDII欧美：删表头排序后，改用固定分组顺序
+    if (currentTab.value === 'QDII欧美' && data.length > 0) {
+      const fallback = data.length + 1
+      data = [...data].sort((a, b) => {
+        const oa = QDII_OUMEI_FIXED_ORDER[a.fund_code] ?? fallback
+        const ob = QDII_OUMEI_FIXED_ORDER[b.fund_code] ?? fallback
+        return oa - ob
+      })
     }
 
     return data

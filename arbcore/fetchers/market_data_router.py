@@ -18,10 +18,10 @@ import os
 logger = logging.getLogger(__name__)
 
 
-# [AI-2026-08-16] 不再硬编码 D:\Study\arbTest，改为 __file__ 相对推导项目根（兼容项目下移 src/）
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）；项目根父目录/database
-_MASTER_DB_PATH = os.path.join(os.path.dirname(_PROJECT_ROOT), "database", "arb_master.db")
+# [AI-2026-10-07] 主库唯一：走 arbcore 统一解析（旧 fallback 拼 <LOFarb>/database/arb_master.db，搬迁后不存在）。
+from arbcore.database.db_manager import _resolve_db_path
+
+_MASTER_DB_PATH = _resolve_db_path()
 
 
 class MarketDataRouter:

@@ -257,6 +257,42 @@ class DashboardSnapshotService:
                 snapshot = self._snapshots.get(category)
                 if snapshot:
                     return dict(snapshot)
+                # [AI-2026-10-06] 兜底：分类无后台快照循环（如后端启动时该分类尚无成员基金、
+                # 或首屏 refresh_once 抛异常且 previous=None 未落下任何快照）时，按需同步构建一次，
+                # 避免「TAB 存在却永久 NO DATA / dashboard snapshot not ready」。
+                # 触发条件 = self._snapshots 中无该分类键（首填失败或循环未起），下次请求即自愈，
+                # 不再依赖重启后端。构建失败仅记 WARNING 并返回空，绝不抛到 API 层。
+                if self._category_has_funds(category):
+                    try:
+                        data = self.fund_service.get_unified_dashboard_data(category=category)
+                        if isinstance(data, list) and data:
+                            snapshot = {
+                                "data": data,
+                                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                                "stale": False,
+                                "source_status": self._source_status(),
+                                "compute_ms": 0,
+                                "error": None,
+                                "key": category,
+                                "max_nav_date": None,
+                            }
+                            self._snapshots[category] = snapshot
+                            logger.info("[SNAPSHOT] 按需构建分类快照 key=%s 基金数=%d", category, len(data))
+                            return dict(snapshot)
+                        # 空结果（异常被 get_unified_dashboard_data 顶层吞成 []，或该分类确无数据）：
+                        # 不落快照，下次请求重试（函数自身 5s 缓存保证重试开销极小），避免永久缓存空。
+                        logger.warning("[SNAPSHOT] 按需构建分类快照 %s 返回空（可能该分类估值抛异常，查后端日志 'get_unified_dashboard_data 失败'）", category)
+                    except Exception as exc:
+                        logger.warning("[SNAPSHOT] 按需构建分类快照失败 %s: %s", category, exc)
+                return {
+                    "data": [],
+                    "updated_at": None,
+                    "stale": True,
+                    "source_status": self._source_status(),
+                    "compute_ms": 0,
+                    "error": "dashboard snapshot not ready",
+                    "key": key,
+                }
             elif watchlist:
                 # [AI-2026-08-16] 优先取专用 watchlist 快照；若不存在(周末/重启后门禁未生成)，
                 # fallback 到从各分类缓存快照中按 fund_code 过滤，避免"我的自选"在非交易日显示空白。

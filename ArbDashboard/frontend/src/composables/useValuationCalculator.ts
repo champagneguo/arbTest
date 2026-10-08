@@ -150,46 +150,93 @@ export function useValuationCalculator() {
     return []
   })
 
-  /** 基准日 ETF 收盘价文本 */
-  const baseEtfsText = computed(() => {
-    if (!meta.value || !meta.value.base_data || !meta.value.fund_config) return '-'
-    const bd = meta.value.base_data
-    const cfg = meta.value.fund_config
-    const portfolio = cfg.valuation_portfolio || cfg.hedging_portfolio || []
-    return portfolio
-      .map((item: any) => {
-        let sym = item.symbol || ''
-        for (const suffix of ['-EU', '-JP', '-HK']) {
-          if (sym.endsWith(suffix) && !sym.startsWith('^')) {
-            sym = '^' + sym
-            break
-          }
-        }
-        const cleanSym = sym.replace(/^\^/, '')
-        const caretSym = sym.startsWith('^') ? sym : '^' + sym
-        const price =
-          bd[caretSym] !== undefined
-            ? bd[caretSym]
-            : bd[cleanSym] !== undefined
-              ? bd[cleanSym]
-              : 0
-        return `${sym}: ${Number(price).toFixed(2)} (${Number(item.weight).toFixed(1)}%)`
-      })
-      .join(' | ')
-  })
+  /** 持仓市场分类（纯展示）：symbol 后缀/代码形态推断，与对标站用词刻意不同（香港/A股 vs 港股） */
+  const marketOf = (raw: string): string => {
+    const s = (raw || '').toUpperCase()
+    if (s.endsWith('-JP')) return '日本'
+    if (s.endsWith('-EU')) return '欧洲'
+    if (s.endsWith('-HK')) return '香港'
+    const clean = s.replace(/^\^/, '')
+    // 内部指数合成代码（DB 篮子权威 znb_*）：NKY=日经→日本，DAX=德→欧洲
+    if (/\.T$/.test(clean) || clean.includes('NKY')) return '日本'
+    if (clean.includes('DAX') || clean.includes('CAC') || clean.includes('FTSE')) return '欧洲'
+    if (/^(MGC|MCL|MES|MNQ|GC|CL|SI|HG|ES|NQ|NK|AG\d*)$/.test(clean)) return '期货'
+    if (/^(SH|SZ)\d{6}$/.test(clean)) return 'A股'
+    if (/^\d{5}$/.test(clean)) return '香港'
+    if (/^\d{6}$/.test(clean)) return 'A股'
+    return '美股'
+  }
 
-  /** 实时 ETF 价格文本 */
-  const realtimeEtfsText = computed(() => {
-    if (!meta.value || !meta.value.realtime_quotes) return '-'
-    return Object.entries(meta.value.realtime_quotes)
-      .map(([sym, quoteObj]) => {
-        const price =
-          quoteObj && typeof quoteObj === 'object'
-            ? (quoteObj as any).price
-            : quoteObj
-        return `${sym}: ${price ? Number(price).toFixed(2) : '-'}`
+  /** 市场 → chip 配色 class（淡雅同色系，浅底深字，与对标站区分色思路但纯自起色板） */
+  const marketClass = (m: string): string => {
+    switch (m) {
+      case '美股': return 'mkt-us'
+      case '香港': return 'mkt-hk'
+      case '日本': return 'mkt-jp'
+      case '欧洲': return 'mkt-eu'
+      case 'A股': return 'mkt-cn'
+      case '期货': return 'mkt-ft'
+      default: return 'mkt-other'
+    }
+  }
+
+  /**
+   * 持仓实时价列表（2026-10-07 东哥拍板）：
+   * 合并 占比 / T-2收盘 / T-1收盘·涨跌 / 实时价 / 盘中涨跌 / 估值影响 为结构化行，
+   * 取代原 baseEtfsText / realtimeEtfsText 两段内联文本（信息密度低且易混淆）。
+   * 数据全部来自 valuation_meta 现成字段（中文名来自 meta.holding_names，后端腾讯批量抓）。
+   */
+  const holdingRows = computed(() => {
+    if (!meta.value) return []
+    const cfg = meta.value.fund_config || {}
+    const bd = meta.value.base_data || {}
+    const t1 = meta.value.t1_data || {}
+    const rq = meta.value.realtime_quotes || {}
+    const names = meta.value.holding_names || {}
+    const t1Map: Record<string, { price: number; pct_change: number }> = {}
+    for (const info of t1.etfs_info || []) {
+      if (info && info.symbol) t1Map[info.symbol] = info
+    }
+    const vp = cfg.valuation_portfolio
+    const portfolio: any[] = vp && vp.length > 0 ? vp : cfg.hedging_portfolio || []
+    const rows: any[] = []
+    for (const item of portfolio) {
+      const raw = item.symbol || ''
+      if (!raw) continue
+      // 与后端 display_symbol 规则一致：-EU/-JP/-HK 后缀 → ^ 前缀展示
+      let display = raw
+      for (const suffix of ['-EU', '-JP', '-HK']) {
+        if (raw.endsWith(suffix) && !raw.startsWith('^')) {
+          display = '^' + raw
+          break
+        }
+      }
+      const clean = display.replace(/^\^/, '')
+      const t1info = t1Map[display] || t1Map[clean] || t1Map[raw]
+      const t2raw = bd[display] ?? bd[raw] ?? bd[clean]
+      const t2 = t2raw !== undefined && t2raw !== null && Number(t2raw) > 0 ? Number(t2raw) : null
+      const t1p = t1info && Number(t1info.price) > 0 ? Number(t1info.price) : null
+      const quote = rq[raw] || rq[clean] || rq[display] || null
+      const rt = quote && quote.price && Number(quote.price) > 0 ? Number(quote.price) : null
+      // 盘中涨跌 = 实时价 ÷ T-1收盘 − 1（行情源缺数时为 null，显示 '-'）
+      const rtChg = rt !== null && t1p !== null ? (rt / t1p - 1) * 100 : null
+      // 估值影响 = 占比 × 盘中涨跌（对该基金净值贡献的百分点）
+      const impact = rtChg !== null ? (Number(item.weight) * rtChg) / 100 : null
+      rows.push({
+        symbol: display,
+        name: names[raw] || names[clean] || names[display] || '',
+        market: marketOf(raw),
+        mktClass: marketClass(marketOf(raw)),
+        weight: Number(item.weight),
+        t2,
+        t1: t1p,
+        t1Chg: t1info ? Number(t1info.pct_change) : null,
+        rt,
+        rtChg,
+        impact,
       })
-      .join(' | ')
+    }
+    return rows
   })
 
   /** 外盘数据源文本 */
@@ -690,8 +737,7 @@ export function useValuationCalculator() {
     isQDIIJapan,
     positionRatio,
     uniqueValuationSymbols,
-    baseEtfsText,
-    realtimeEtfsText,
+    holdingRows,
     foreignSource,
     localDepthSource,
     rateHeaderName,

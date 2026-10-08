@@ -24,25 +24,89 @@ def _resolve_db_path(explicit=None):
     if env:
         return env
     here = os.path.abspath(os.path.dirname(__file__))
+    # [AI-2026-10-06] 单一真库 = <ARB根>/_shared/arb_master.db（与 ETFarb core/db.py 一致）。
+    # 向上遍历祖先找 <祖先>/_shared/arb_master.db，命中即用（标准 clone 布局：_shared 与各程序同级），
+    # 避免向上找 database/ 时命中 LOFarb/database/ 下的空库/旧库
+    # （2026-10-06 空库致分类标签全丢的事故根因：搬目录后 _resolve_db_path 命中 LOFarb/database 空库）。
+    # ARM 部署无 _shared，此回退不命中，仍走下方 database/ 上溯 → /home/ubuntu/arbtest/database/arb_master.db。
     cur = here
     while True:
-        candidate = os.path.join(cur, 'database')
-        # 数据目录特征：database/ 存在，且不是 arbcore 自身代码目录（含 db_manager.py 即代码目录，跳过）
-        if os.path.isdir(candidate) and not os.path.exists(os.path.join(candidate, 'db_manager.py')):
-            return os.path.join(candidate, 'arb_master.db')
+        cand = os.path.join(cur, '_shared', 'arb_master.db')
+        if os.path.exists(cand):
+            return cand
         parent = os.path.dirname(cur)
         if parent == cur:
             break
         cur = parent
-    # 兜底：退回原三层上溯逻辑（极不可能走到）
+    cur = here
+    fallback = None
+    while True:
+        candidate = os.path.join(cur, 'database')
+        # 数据目录特征：database/ 存在，且不是 arbcore 自身代码目录（含 db_manager.py 即代码目录，跳过）
+        if os.path.isdir(candidate) and not os.path.exists(os.path.join(candidate, 'db_manager.py')):
+            dbf = os.path.join(candidate, 'arb_master.db')
+            # [AI-2026-10-07] 文件级校验：database/ 目录存在 ≠ 其中有主库。
+            # 旧写法只判「目录存在」即返回 candidate/arb_master.db，而 LOFarb/database/ 目录确实存在
+            # （放 arb_tran.db / 缓存 json），其中却并无 arb_master.db ⇒ 返回一条不存在的路径 ⇒
+            # DatabaseManager.__init__ 的 os.makedirs + sqlite3.connect（默认 READWRITE|CREATE）
+            # 静默落盘一个 0 字节空库 —— 即 10-06「命中空库致分类标签全丢」的完整触发链。
+            # 现在只有库文件确实存在才返回；「目录在而库缺失」者仅记为 fallback（供首次建库）。
+            if os.path.exists(dbf):
+                return dbf
+            if fallback is None:
+                fallback = dbf
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    # 全仓未见已存在的主库：命中过 database/ 目录者返回该预期路径（首次建库由调用方创建）；
+    # 否则退回原三层上溯逻辑（极不可能走到）。
+    if fallback:
+        return fallback
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
     return os.path.join(base_dir, 'database', 'arb_master.db')
+
+
+# [AI-2026-10-07] 主库启动自检（防呆）—— 挡住两类事故：
+#   ① 主库文件缺失（路径搬迁 / env 未设 / 布局变化）
+#   ② 主库文件存在，但其实是空库或错库（**10-06「分类标签全丢」的真实形态**：
+#      文件被 makedirs+connect 造出来后「存在」了，任何 os.path.exists 检查都会放行）
+# 只读（mode=ro）打开，绝不创建 / 修改任何数据。返回 (ok, problems)，不抛异常，
+# 由调用方决定是告警还是拒绝启动。
+def check_master_db(db_path=None, required_tables=None):
+    import pathlib
+
+    path = os.path.abspath(db_path or _resolve_db_path())
+    problems = []
+    if not os.path.exists(path):
+        return False, [f"主库文件不存在: {path}"]
+    if os.path.getsize(path) == 0:
+        return False, [f"主库为 0 字节空文件: {path}（sqlite 允许连上，但没有任何表）"]
+
+    # 默认体检项：基金列表 + 篮子权威表（DB 篮子权威，二者为空即视为错库）
+    checks = required_tables or (("unified_fund_list", 1), ("fund_basket_weights", 1))
+    try:
+        # 用 as_uri() 生成跨平台正确 URI；mode=ro 保证文件不存在时直接报错且不落盘
+        conn = sqlite3.connect(pathlib.Path(path).as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    except Exception as e:
+        return False, [f"主库只读打开失败: {type(e).__name__}: {e}（路径: {path}）"]
+
+    try:
+        for tbl, min_rows in checks:
+            try:
+                n = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                if n < min_rows:
+                    problems.append(f"表 {tbl} 行数={n}（应 ≥ {min_rows}）→ 疑似空库/错库")
+            except sqlite3.OperationalError as e:
+                problems.append(f"表 {tbl} 不可读: {e}")
+    finally:
+        conn.close()
+    return (not problems), problems
 
 
 class DatabaseManager:
     def __init__(self, db_path=None, include_trading=False):
         if db_path is None:
-            # [AI-2026-08-16] 活库移出仓库根到 D:\Study\arbTest\database（物理隔离防泄漏）
             # [AI-2026-08-17] 改用 _resolve_db_path：向上找含 database/ 的祖先目录定位项目根，
             #   根治 ARM 部署无 src/ 层导致 '..','..','..' 算错项目根、连到 /home/ubuntu/database 空库的 bug
             db_path = _resolve_db_path()
@@ -88,6 +152,11 @@ class DatabaseManager:
             except sqlite3.OperationalError: pass
             # [AI-2026-07-09] 新增 jpy_cny_mid 列支持日元汇率（QDII日本估值）
             try: conn.execute('ALTER TABLE exchange_rate ADD COLUMN jpy_cny_mid REAL')
+            except sqlite3.OperationalError: pass
+            # [AI-2026-10-07] 新增 eur_cny_mid / eur_cny_spot 列支持欧元汇率（QDII欧洲德/法ETF估值）
+            try: conn.execute('ALTER TABLE exchange_rate ADD COLUMN eur_cny_mid REAL')
+            except sqlite3.OperationalError: pass
+            try: conn.execute('ALTER TABLE exchange_rate ADD COLUMN eur_cny_spot REAL')
             except sqlite3.OperationalError: pass
 
             conn.execute('''CREATE TABLE IF NOT EXISTS usa_etf_daily_prices (date TEXT NOT NULL, symbol TEXT NOT NULL, price REAL, netvalue REAL, updated_at TIMESTAMP DEFAULT (datetime('now', 'localtime')), PRIMARY KEY (date, symbol))''')

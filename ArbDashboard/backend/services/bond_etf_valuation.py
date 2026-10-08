@@ -426,19 +426,16 @@ class BondETFValuation:
         
         返回: [{'date': '2026-05-06', 'open': 227.09, 'close': 226.93, 'high': 227.09, 'low': 226.91, 'volume': 43717250}]
         """
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000012,day,,,{days},qfq"
+        url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh000012,day,,,{days},qfq"
         try:
             resp = requests.get(url, timeout=5, proxies={"http": None, "https": None})
             if resp.status_code != 200:
-                return []
-            
+                raise RuntimeError(f"HTTP {resp.status_code}")
             data = resp.json()
             sh_data = data.get("data", {}).get("sh000012", {})
             day_data = sh_data.get("day", [])
-            
             if not day_data:
-                return []
-            
+                raise RuntimeError("腾讯国债指数无日K数据")
             result = []
             for item in day_data:
                 if len(item) >= 6:
@@ -450,11 +447,20 @@ class BondETFValuation:
                         'low': float(item[4]),
                         'volume': float(item[5]),
                     })
-            
-            # 按日期降序（最新在前）
             return result
         except Exception as e:
-            logger.error(f"[BondETF] 获取国债指数历史失败: {e}")
+            logger.warning(f"[BondETF] 腾讯国债指数失败({e})，试新浪兜底")
+            try:
+                s_url = (f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                         f"CN_MarketData.getKLineData?symbol=sh000012&scale=240&ma=no&datalen={days}")
+                sd = requests.get(s_url, headers={"User-Agent": "Mozilla/5.0"},
+                                   timeout=8, proxies={"http": None, "https": None}).json()
+                if isinstance(sd, list):
+                    return [{'date': x['day'], 'open': float(x['open']), 'close': float(x['close']),
+                             'high': float(x['high']), 'low': float(x['low']),
+                             'volume': float(x['volume'])} for x in sd if x.get('close')]
+            except Exception as e2:
+                logger.error(f"[BondETF] 新浪兜底也失败: {e2}")
             return []
 
     def _get_treasury_pct(self) -> Optional[float]:

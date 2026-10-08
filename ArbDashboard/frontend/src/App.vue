@@ -44,23 +44,23 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => ({
     primaryColorHover: '#4f8ef7',
     primaryColorPressed: '#1d4ed8',
     primaryColorSuppl: primaryColor.value,
-    bodyColor: '#f4f7fb',
+    bodyColor: '#f7f8fa',
     cardColor: '#ffffff',
     tableColor: '#ffffff',
-    textColorBase: '#1f2937',
-    borderColor: '#e5edf7'
+    textColorBase: '#1f2328',
+    borderColor: '#ebedf0'
   },
   DataTable: {
     thFontWeight: '700',
-    thColor: '#eef5ff',
-    thColorHover: '#e8f1ff',
+    thColor: '#f6f7f9',
+    thColorHover: '#eef0f2',
     tdColor: '#ffffff',
-    tdColorHover: '#f8fbff',
-    tdColorStriped: '#fbfdff',
-    tdColorHoverStriped: '#f8fbff',
-    borderColor: '#e5edf7',
-    thTextColor: '#21395c',
-    tdTextColor: '#1f2937'
+    tdColorHover: '#f6f7f9',
+    tdColorStriped: '#fbfcfd',
+    tdColorHoverStriped: '#f6f7f9',
+    borderColor: '#ebedf0',
+    thTextColor: '#1f2328',
+    tdTextColor: '#1f2328'
   },
   Card: {
     borderRadius: '8px'
@@ -81,9 +81,46 @@ provide('themeColor', primaryColor)
   /* 初始变量 */
   --primary-color: #2563eb;
   --primary-light: #eff6ff;
-  --bg-color: #f4f7fb;
+  --bg-color: #f7f8fa;
   --text-main: #1f2937;
   --text-muted: #64748b;
+
+  /* === LOFarb 统一设计系统 · Codex 淡雅风 (2026-10-07) ===
+     实时估值页(ValuationCalculator) + 静态历史弹窗(Dashboard) 统一引用以下 token，
+     取代散落的硬编码强色。低饱和、克制、靠边框与留白分隔，不靠高饱和色块。 */
+  --co-bg: #f7f8fa;            /* 页面底：中性微冷灰白 */
+  --co-surface: #ffffff;       /* 卡片/面板底 */
+  --co-surface-2: #f6f7f9;     /* 次级底（信息条/卡内分区） */
+  --co-border: #ebedf0;        /* 主边框/分隔线 */
+  --co-border-soft: #f1f2f4;   /* 表内细线 */
+  --co-text: #1f2328;          /* 主文 */
+  --co-text-2: #5b6470;        /* 次文 */
+  --co-text-3: #8a929e;       /* 弱文/标签 */
+  --co-accent: #5b8fc9;        /* 主强调（淡雅蓝：估值/溢价强调，非涨跌语义不用绿） */
+  --co-accent-soft: #edf3fb;   /* 强调底色 */
+  --co-accent-text: #33629c;   /* 强调文字（深一档） */
+  --co-up: #d64045;            /* 涨红（柔和） */
+  --co-down: #2e9e5b;          /* 跌绿（柔和） */
+  --co-neutral: #8a929e;       /* 中性（0/无数据） */
+  --co-up-soft: #fbeaeb;       /* 涨红·淡底（按钮/提示） */
+  --co-down-soft: #e9f5ed;     /* 跌绿·淡底 */
+  --co-warn: #a9790f;          /* 警示琥珀（低饱和） */
+  --co-warn-soft: #faf4e6;     /* 警示淡底 */
+  --co-rt-bg: #edf3fb;         /* 历史误差·实时估值列底（淡蓝） */
+  --co-rt-head: #dce8f5;       /* 实时估值列表头 */
+  --co-static-bg: #faf4e6;     /* 历史误差·静态估值列底 */
+  --co-static-head: #f3e8cf;   /* 静态估值列表头 */
+  --co-si-bg: #f1eff8;         /* 历史误差·雪山/机构估值列底（淡紫灰） */
+  --co-si-head: #e3dff0;       /* 雪山/机构估值列表头 */
+  --co-font-sans: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --co-font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Consolas, monospace;
+  --co-radius: 8px;
+  --co-radius-sm: 6px;
+  --co-fs-title: 14px;
+  --co-fs-base: 13px;
+  --co-fs-sm: 12px;
+  --co-fs-xs: 11px;
+  --co-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
 }
 
 body {
@@ -168,12 +205,12 @@ html {
 
 /* success 状态按钮 */
 .n-button.n-button--success-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text) {
-  background-color: #f0fdf4 !important;
-  color: #16a34a !important;
-  border: 1px solid #16a34a !important;
+  background-color: var(--co-down-soft) !important;
+  color: var(--co-down) !important;
+  border: 1px solid var(--co-down) !important;
 }
 .n-button.n-button--success-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover {
-  background-color: #16a34a !important;
+  background-color: var(--co-down) !important;
   color: #ffffff !important;
 }
 .n-button.n-button--success-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover * {
@@ -182,12 +219,12 @@ html {
 
 /* warning 状态按钮 */
 .n-button.n-button--warning-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text) {
-  background-color: #fffbeb !important;
-  color: #d97706 !important;
-  border: 1px solid #d97706 !important;
+  background-color: var(--co-warn-soft) !important;
+  color: var(--co-warn) !important;
+  border: 1px solid var(--co-warn) !important;
 }
 .n-button.n-button--warning-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover {
-  background-color: #d97706 !important;
+  background-color: var(--co-warn) !important;
   color: #ffffff !important;
 }
 .n-button.n-button--warning-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover * {
@@ -196,12 +233,12 @@ html {
 
 /* error 状态按钮 */
 .n-button.n-button--error-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text) {
-  background-color: #fef2f2 !important;
-  color: #dc2626 !important;
-  border: 1px solid #dc2626 !important;
+  background-color: var(--co-up-soft) !important;
+  color: var(--co-up) !important;
+  border: 1px solid var(--co-up) !important;
 }
 .n-button.n-button--error-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover {
-  background-color: #dc2626 !important;
+  background-color: var(--co-up) !important;
   color: #ffffff !important;
 }
 .n-button.n-button--error-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover * {
@@ -210,12 +247,12 @@ html {
 
 /* info 状态按钮 */
 .n-button.n-button--info-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text) {
-  background-color: #f0f9ff !important;
-  color: #0284c7 !important;
-  border: 1px solid #0284c7 !important;
+  background-color: var(--co-accent-soft) !important;
+  color: var(--co-accent-text) !important;
+  border: 1px solid var(--co-accent) !important;
 }
 .n-button.n-button--info-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover {
-  background-color: #0284c7 !important;
+  background-color: var(--co-accent) !important;
   color: #ffffff !important;
 }
 .n-button.n-button--info-type:not(.n-button--quaternary):not(.n-button--circle):not(.n-button--dashed):not(.n-button--text):hover * {
