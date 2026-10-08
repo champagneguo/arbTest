@@ -998,6 +998,11 @@ class HoldingService:
                 "err_pct": round(err * 100, 4) if err is not None else None,
                 "err_bp": round(err * 10000, 2) if err is not None else None,
                 "prev_official_nav": round(prev_nav, 6),
+                # [AI-2026-10-08 东哥需求·锚点透明化] 本行 T-2（涨跌起点/分母）所对应的
+                # 交易日 = 基数 prev_nav 的净值日（长假/停牌期间会早于本行日期数天）。
+                # 纯展示字段、不参与任何计算；前端据此把展开表表头标成
+                # 「T-2→T-1 收盘（自锚点 MM-DD 累计）」，避免被误读为"当日涨跌"。
+                "anchor_date": prev_date,
                 # [AI-2026-10-05 东哥需求·导出核对 CSV] 复算所需的三个"原始输入"，
                 # 此前只存在于 periods[]（期级）与内部变量里，逐行导出后 CSV 才能自洽：
                 #   pos_pct        = 该行有效权重和(%)，即 est = prev_nav*(1 + pos_pct/100*r_basket) 的 pos。

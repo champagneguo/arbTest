@@ -60,7 +60,10 @@ from datetime import datetime
 # Setup logging
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 workspace_root = os.path.abspath(os.path.join(backend_dir, ".."))
-logs_dir = os.path.abspath(os.path.join(workspace_root, "..", "..", "logs"))
+# [AI-2026-10-08 修正] 仓库根 = src 的父：deploy/、database/ 都在这一层（deploy 已被移出 src/）。
+#   ARM 同构：/home/ubuntu/arbtest/{src,deploy,database}。禁止再用 <repo>/src/deploy（该路径不存在）。
+repo_root = os.path.abspath(os.path.join(workspace_root, "..", ".."))
+logs_dir = os.path.abspath(os.path.join(repo_root, "logs"))
 
 START_TIME = time.time()  # 进程启动时刻，供 /api/status 计算运行时长
 
@@ -707,36 +710,10 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(nav_update_scheduler())
         logger.info("⏰ [自动净值更新] 定时器已注册 (18:00 / 19:30 / 21:00)")
 
-        # 7.5 [2026-07-31] 收盘后数据流水线定时：15:35 自动跑 daily-close → export → upload
-        # 取代原 Windows 计划任务（目录改名后已失效），改为后端内部调度，零外部组件。依赖后端常驻。
-        # 调一个封装脚本顺序执行三步（避免 Popen 并发竞态）；_popen_script_once 自带防重复运行保护。
-        _daily_close_done_date = set()
-
-        async def daily_close_scheduler():
-            while True:
-                await asyncio.sleep(120)
-                now = datetime.now()
-                if now.weekday() in (5, 6):
-                    _daily_close_done_date.clear()
-                    continue
-                today = now.strftime("%Y-%m-%d")
-                # 15:35 触发；若后端盘中才启动且已过 15:35，则当日补跑一次（best-effort）
-                if today not in _daily_close_done_date and now.strftime("%H:%M") >= "15:35":
-                    _daily_close_done_date.add(today)
-                    logger.info("⏰ [收盘后流水线] 自动触发 15:35 daily-close 更新...")
-                    system_status.add_milestone("INFO", "⏰ 15:35 收盘后数据更新")
-                    sp = os.path.normpath(os.path.join(project_root, "deploy", "H5web", "daily_close_pipeline.py"))
-                    pe = _find_python()
-                    if pe and os.path.exists(sp):
-                        if _popen_script_once([pe, sp], project_root, "daily_close_pipeline.py"):
-                            logger.info("✅ [收盘后流水线] daily_close_pipeline 已启动")
-                        else:
-                            logger.warning("⚠️ [收盘后流水线] 启动被拒（可能已在运行）")
-                    else:
-                        logger.warning(f"⚠️ [收盘后流水线] 未找到脚本或Python: {sp}")
-
-        asyncio.create_task(daily_close_scheduler())
-        logger.info("⏰ [收盘后流水线] 定时器已注册 (15:35 自动 daily-close → export → upload)")
+        # 7.5 [2026-10-08 移除] 原「收盘后数据流水线定时（15:35 自动 daily-close → export → upload）」。
+        #   东哥确认该功能已取消、不再需要（deploy/H5web/daily_close_pipeline.py 已不存在）⇒ 整段删除：
+        #   此前它 15:35 因脚本缺失每天静默告警，且引用的还是 deploy/ 迁移前的旧布局路径（src/deploy/…）。
+        #   注：_popen_script_once / _find_python 仍被上方净值更新等处复用，定义保留。
 
     except Exception as e:
         logger.error(f"❌ Failed during backend startup: {e}")
@@ -1127,7 +1104,7 @@ async def get_status():
         last_push = None
         for cand in [
             os.path.expanduser("~/arbtest/deploy/.last_push"),
-            os.path.join(backend_dir, "..", "deploy", ".last_push"),
+            os.path.join(repo_root, "deploy", ".last_push"),
         ]:
             try:
                 if os.path.exists(cand):
@@ -1161,6 +1138,11 @@ async def get_market():
 # 新浪外盘期货 hf_ 一把抓：黄金/白银/WTI + 标普500/纳斯达克100/日经225（东哥拍板：道琼斯不要）。
 # 只返回 最新价+涨跌幅（昨结为基准），不带"收盘/行情/行情时间"等冗余字段。
 # 60s 内存缓存：前端随 fetchData 轮询也只打新浪一分钟一次；抓取失败回退旧缓存，绝不出假值（缺字段直接跳过）。
+# [AI-2026-10-08 东哥需求] 概览条展示对应合约代码：六项全部走新浪外盘期货 hf_ API，
+# 名称→合约对照（后端查询代码即 symbol 字段，去掉 hf_ 前缀即 CME/COMEX 合约根代码）：
+#   黄金=GC(COMEX金) 白银=SI(COMEX银) WTI原油=CL(NYMEX原油)
+#   标普500=ES(CME E-mini) 纳斯达克100=NQ(CME E-mini) 日经225=NK(CME日元计价)
+# 注：纳斯达克100 用的是 NQ **期货**，不是 .ndx/.NDX 现货指数（两者不同源、盘中点位有基差）。
 _GLOBAL_OVERVIEW_SYMBOLS = [
     ("commodity", "黄金",        "hf_GC"),
     ("commodity", "白银",        "hf_SI"),
@@ -1210,6 +1192,8 @@ async def get_global_overview():
                 "group": group,
                 "name": name,
                 "symbol": sym,
+                # [AI-2026-10-08 东哥需求] 合约根代码（GC/SI/CL/ES/NQ/NK），前端在名称后跟一个灰色小字
+                "code": sym.replace("hf_", ""),
                 "price": price,
                 "change_pct": round((price / base - 1) * 100, 2),
             })
@@ -4107,7 +4091,7 @@ from arbcore.utils.tokyo_client import (
     age_minutes as _age_min,
 )
 
-H5WEB_DIR = os.path.join(arbcore_parent, "deploy", "H5web")
+H5WEB_DIR = os.path.join(repo_root, "deploy", "H5web")
 
 
 @app.get("/api/tokyo/status")

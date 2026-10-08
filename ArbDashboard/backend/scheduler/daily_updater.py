@@ -551,13 +551,17 @@ class DailyUpdater(BaseApp):
                 usd_val = exchange_rate_data.get('usd_cny_mid')
                 hkd_val = exchange_rate_data.get('hkd_cny_mid')
                 eur_val = exchange_rate_data.get('eur_cny_mid')
+                # [AI-2026-10-08 东哥] 日志补 JPY：同一次 chinamoney 抓取已带 jpy_cny_mid，
+                # 原日志只打 USD/HKD/EUR。**仅取变量用于打印，不改下方 upsert 行为**——
+                # JPY 仍由本函数后段（has_jpy 分支）单独 upsert，避免在此重复写库打乱既有判据。
+                jpy_val = exchange_rate_data.get('jpy_cny_mid')
                 # [A根因修复 2026-09-18] 中间价尚未发布(usd/hkd为空)时，绝不 upsert 今天行
                 # 避免建出"中间价=NULL"的脏行；保留已有最新行，待 9:15 后官方发布再补
                 if date_info and usd_val is not None and hkd_val is not None:
                     try:
                         date_info_str = pd.to_datetime(str(date_info)).strftime('%Y-%m-%d')
                         self.db.upsert_exchange_rate(date_info_str, usd_cny_mid=usd_val, hkd_cny_mid=hkd_val, eur_cny_mid=eur_val)
-                        self.logger.info(f"✅ 人民币中间价入库: {date_info_str} -> USD:{usd_val}, HKD:{hkd_val}, EUR:{eur_val}")
+                        self.logger.info(f"✅ 人民币中间价入库: {date_info_str} -> USD:{usd_val}, HKD:{hkd_val}, JPY:{jpy_val}, EUR:{eur_val}")
 
                         # 关键修复：只有当抓取到的汇率实际生效日期是今天（或更晚）时，才标记今日已同步
                         # 如果抓到的是昨天的日期，说明今天最新的还没更新，我们绝不标记今日同步，以便稍后重试
@@ -1076,12 +1080,17 @@ class DailyUpdater(BaseApp):
         try:
             import subprocess, sys, os
             from arbcore.config import account_private as ap
-            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            # [AI-2026-10-08 修正] deploy/ 已移出 src/，现与 src **平级**（ARM 上更早就是 ~/arbtest/deploy）。
+            #   原 4 层 dirname 只上溯到 <repo>/src ⇒ tool 指向不存在的 <repo>/src/deploy/core/…，
+            #   两机步骤4.5 长期静默跳过（ARM 自 10-02 起、本机自 10-07 搬迁后），fund_purchase_status 停更。
+            #   项目根 = src 的父，deploy/ 与 database/ 均在该层。
+            _src_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            root = os.path.dirname(_src_root)  # <repo>
             tool = os.path.join(root, "deploy", "core", "import_purchase_status.py")
             if not os.path.exists(tool):
                 self.logger.warning(f"⚠️ 未找到导入工具 {tool}，跳过申赎状态同步")
                 return
-            tmp = os.path.join(os.path.dirname(root), "database", "_ps_tmp.json")
+            tmp = os.path.join(root, "database", "_ps_tmp.json")
             cmd = [sys.executable, tool, "pull",
                    "--host", ap.VPS_HOST, "--port", str(ap.VPS_PORT),
                    "--user", ap.VPS_USER, "--key", ap.VPS_KEY_PATH,
@@ -1171,6 +1180,29 @@ class DailyUpdater(BaseApp):
             for s in ('.NDX', '.INX'):
                 sym_meta.setdefault(s, ('US', 'INDEX'))
 
+        # [AI-2026-10-08 东哥定夺] 补：被基金用作 related_index 的「ETF」其日线也须进 index_history。
+        #   step11 从 index_history[related_index] 取指数比率；但 09-23 起"ETF 类型只写 usa_etf"，
+        #   导致 XOP/XBI/SOXX/RSPH/INDA/XLY/GLD/USO/VGT/KWEB/XLE 等 related_index 停在 2026-06-25，
+        #   step11 取不到指数 → 回退无窗口 → 旧日期 index_pct/static_val 成垃圾。此处恢复同步，
+        #   与 INDEX 类型合并为「index_history 落库符号集」，避免此类停滞复发。
+        related_index_syms = set()
+        try:
+            conn = self.db._get_conn()
+            try:
+                related_index_syms = {
+                    str(r[0]).strip() for r in conn.execute(
+                        "SELECT DISTINCT related_index FROM unified_fund_list "
+                        "WHERE related_index IS NOT NULL AND related_index != '' "
+                        "AND related_index != '-' AND related_index NOT LIKE '%,%'"
+                    ).fetchall() if r[0]
+                }
+            finally:
+                conn.close()
+        except Exception as e:
+            self.logger.warning(f"⚠️ [海外/指数] related_index 读取失败，仅按 asset_type 落库: {e}")
+        # index_history 落库符号集 = INDEX 类型 ∪ 被用作 related_index 的 ETF
+        index_write_syms = {s for s, (m, a) in sym_meta.items() if a == 'INDEX'} | related_index_syms
+
         for sym in symbols:
             df = self.hist_manager.get_prices(sym, source="sina", start_date=start_date)
             if not df.empty:
@@ -1187,9 +1219,9 @@ class DailyUpdater(BaseApp):
                         continue
                     self.db.upsert_usa_etf_price(date=date_str, symbol=sym, price=float(close_val))
                     written_count += 1
-                    # [AI-2026-09-23] 指数类型（.NDX/.INX/.SP500-45 等）写 index_history，
-                    # ETF 类型只写 usa_etf_daily_prices；由 symbol_master.asset_type 区分。
-                    if sym_meta.get(sym, ('', ''))[1] == 'INDEX':
+                    # [AI-2026-09-23] 指数类型（.NDX/.INX/.SP500-45 等）写 index_history，ETF 类型只写 usa_etf_daily_prices。
+                    # [AI-2026-10-08 东哥定夺] 被用作 related_index 的 ETF 也写 index_history（见上方 index_write_syms）。
+                    if sym in index_write_syms:
                         self.db.upsert_index_history(symbol=sym, date=date_str, close=float(close_val))
                 msg = f"✅ [海外/指数] {sym} 行情同步完成 (写入{written_count}条)"
                 if skipped_count > 0:
@@ -1855,7 +1887,11 @@ class DailyUpdater(BaseApp):
                                 "WHERE fund_code = ? AND date = ?",
                                 (current_idx_close, fund_code, date))
                     else:
-                        current_idx_close = existing_idx_close
+                        # [AI-2026-10-08 东哥定夺] 当日指数无数据（指数市场休市 / 指数源缺口）：
+                        #   绝不复用库里可能陈旧或脏的 index_close —— 曾致 164906 沪市假日行
+                        #   复用遗留脏值 5498（KWEB 实为 ~35）算出 index_pct=+15296%、static_val=185。
+                        #   一律置 None ⇒ 下方 continue（宁缺毋假），该行静态估值交由 step10/篮子或保持原值。
+                        current_idx_close = None
 
                     if current_idx_close is None:
                         continue
@@ -1876,10 +1912,28 @@ class DailyUpdater(BaseApp):
 
                     # 从 index_history 获取基准日指数值（与 current_idx_close 同源），避免 step5 写入的 ETF 价格污染
                     # [AI-2026-07-23] 修复：如果 prev_date 是休市日（无指数数据），往前找最近有数据的交易日
+                    # [AI-2026-10-08 东哥定夺] 加回看窗口：仅允许回溯到 prev_date 前 7 个自然日内的最近
+                    #   有数据交易日（覆盖两市场假期错位）；超出窗口 ⇒ 说明指数源有缺口（如 XOP/XBI/SOXX/
+                    #   RSPH/INDA/XLY 的 index_history 曾停在 06-25），此时 continue（宁缺毋假），
+                    #   绝不无限回溯到数周前 —— 否则 idx_ratio 离谱，index_pct/static_val 成垃圾
+                    #   （实证 162411 07-17 曾算出 index_pct=+12.49%、误差 +9%）。
+                    _LOOKBACK_MAX_DAYS = 7
                     _lookup_date = prev_date
                     if _lookup_date not in idx_data:
                         _sorted_dates = sorted([d for d in idx_data.keys() if d < _lookup_date], reverse=True)
                         _lookup_date = _sorted_dates[0] if _sorted_dates else None
+                        if _lookup_date is not None:
+                            try:
+                                _gap_days = (datetime.strptime(prev_date, '%Y-%m-%d')
+                                             - datetime.strptime(_lookup_date, '%Y-%m-%d')).days
+                            except Exception:
+                                _gap_days = 0
+                            if _gap_days > _LOOKBACK_MAX_DAYS:
+                                self.logger.warning(
+                                    f"    [{fund_code}] {date} 指数 {related_index} 基准日 {prev_date} "
+                                    f"最近数据在 {_lookup_date}（相隔 {_gap_days} 天 > {_LOOKBACK_MAX_DAYS}），"
+                                    f"疑似指数源缺口，跳过（宁缺毋假）")
+                                _lookup_date = None
                     if _lookup_date is None:
                         continue
                     prev_idx_close = idx_data[_lookup_date]

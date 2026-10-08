@@ -209,7 +209,8 @@ class DataFetcher:
                             res_rates['eur'] = float(rate)
 
                 if 'usd' in res_rates:
-                    logger.info(f"国家外汇管理局 - USD: {res_rates.get('usd')}, HKD: {res_rates.get('hkd')}, JPY: {res_rates.get('jpy')}")
+                    # [AI-2026-10-08 东哥] 日志补 EUR：res_rates 早已解析出 eur（下方 eur_cny_mid 同源），原日志漏打
+                    logger.info(f"国家外汇管理局 - USD: {res_rates.get('usd')}, HKD: {res_rates.get('hkd')}, JPY: {res_rates.get('jpy')}, EUR: {res_rates.get('eur')}")
                     # 规范化日期格式为 YYYY-MM-DD
                     raw_date = date_info.split(' ')[0]
                     try:

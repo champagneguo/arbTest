@@ -1342,7 +1342,18 @@ const recalcColumns: DataTableColumns<any> = [
       ])
       const table = h('table', { class: 'leg-table' }, [
         h('thead', {}, h('tr', {}, [
-          th('腿', 'left'), th('占净值'), th('T-2→T-1 收盘', 'center'), th('标的涨跌'), th('汇率(前日→当日)'), th('估值影响'),
+          th('腿', 'left'), th('占净值'),
+          // [AI-2026-10-08 东哥需求·锚点透明化] T-2 起点 = 基数所对应的交易日（anchor_date）。
+          // 长假/停牌期间它会早于本行日期数天，加小字标注，避免把「自锚点累计涨跌」误读成"当日涨跌"。
+          // 动态取 row.anchor_date（非硬编码日期）：普通行显示"自锚点 <前一交易日>"，长假显示"自锚点 09-29"。
+          h('th', { class: 'lt-center' }, [
+            h('div', {}, 'T-2→T-1 收盘'),
+            row.anchor_date
+              ? h('div', { style: 'font-size:10px; font-weight:400; color:#94a3b8; white-space:nowrap;' },
+                  `（自锚点 ${String(row.anchor_date).slice(5)} 累计）`)
+              : null,
+          ]),
+          th('标的涨跌'), th('汇率(前日→当日)'), th('估值影响'),
         ])),
         h('tbody', {}, [...legRows, sumRow, residualRow]),
       ])

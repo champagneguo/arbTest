@@ -6,7 +6,7 @@ import threading
 import functools
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 from typing import List, Dict, Any, Optional, Set
 import logging
@@ -1627,6 +1627,9 @@ class FundService:
             result = []
             # [AI-2026-10-06] 非交易日检测（60s 缓存）：节假日/周末汇率中间价未公布，整体跳过实时估值
             trading_day = _is_trading_day(conn)
+            # [AI-2026-10-08] 北京日期（供涨跌幅「昨收」判据）：显式固定 +08:00，
+            #   勿用 date.today()——ARM 为 UTC，凌晨时段 UTC 日期会落后北京一天，两机口径会分叉。
+            _today_bj = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
             for _, fund in funds_df.iterrows():
                 code = fund['fund_code']
                 _vf_start = time.perf_counter()  # [埋点A] 逐基金计时起点
@@ -1695,11 +1698,19 @@ class FundService:
                     if tv > 0 and sh > 0:
                         metrics['turnover_rate'] = tv / sh
 
-                    # [AI-2026-07-09] 修复涨跌幅：prev_close 必须是"昨收"（前一日收盘价），
-                    # 不能是 iloc[0]（当日最新价，与现价相同会导致涨跌幅≈0 或错乱）。
-                    # valid_prices 按日期降序（iloc[0]=当日），昨收取 iloc[1]，不足则显 None（禁止用当日价兜底）。
+                    # [AI-2026-10-08 FIX] 涨跌幅「昨收」错位一天 —— 原实现无条件取 valid_prices.iloc[1]，
+                    #   隐含假设 iloc[0] 是"当日行"。但当日行由 daily_updater 在收盘后（北京 15:1x）才落库
+                    #   ⇒ 盘中（09:30–15:10）库里最新【有 price】的行其实是【前一交易日】，再退一格 iloc[1]
+                    #   就成了【前前交易日】⇒ 涨跌幅整体错一天（2026-10-08 实测 10 只全错、161815 方向反转）。
+                    #   正解：判「当日行是否已入库」——未入库时最新一行本身就是昨收（取 iloc[0]）。
+                    #   valid_prices 按日期降序。今日非交易日（周末/节假日）走 elif 仍取 iloc[1]，
+                    #   显示的即最后交易日的涨跌幅，不会退成 0。
                     if not valid_prices.empty:
-                        if len(valid_prices) >= 2:
+                        _latest_d = str(valid_prices.iloc[0]['date'])[:10]
+                        if trading_day and _latest_d != _today_bj:
+                            # 今日尚未收盘入库 ⇒ 最新一行即"昨收"
+                            metrics['prev_close'] = valid_prices.iloc[0]['price']
+                        elif len(valid_prices) >= 2:
                             metrics['prev_close'] = valid_prices.iloc[1]['price']
                         else:
                             # [AI-2026-08-07] 不足两日(无昨收)显 None，禁止用当日价/0 充当昨收（SUPREME 铁律）

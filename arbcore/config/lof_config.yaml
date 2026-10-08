@@ -258,7 +258,7 @@ funds:
   sub_category: 黄金
   woody_supported: true
   data_source: woody
-  related_index: GLD,USO
+  related_index: GLD
   valuation_method: basket
   static_valuation:
     basis: basket_price
@@ -320,7 +320,7 @@ funds:
   sub_category: 黄金
   woody_supported: true
   data_source: woody
-  related_index: GLD,USO
+  related_index: GLD
   valuation_method: basket
   static_valuation:
     basis: basket_price

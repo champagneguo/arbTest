@@ -39,7 +39,7 @@
               <span class="ov-glabel">{{ g.label }}</span>
               <div class="ov-items">
                 <div v-for="it in g.items" :key="it.symbol" class="ov-item">
-                  <span class="ov-name">{{ it.name }}</span>
+                  <span class="ov-name">{{ it.name }}<span v-if="it.code" class="ov-code" :title="it.symbol">{{ it.code }}</span></span>
                   <span class="ov-price">{{ it.price.toFixed(2) }}</span>
                   <span class="ov-pct" :class="it.change_pct >= 0 ? 'ov-up' : 'ov-down'">
                     {{ it.change_pct >= 0 ? '+' : '' }}{{ it.change_pct.toFixed(2) }}%
@@ -882,6 +882,8 @@ const tableScrollX = computed(() => {
 .ov-items { display: flex; flex: 1; justify-content: space-around; gap: 6px; }
 .ov-item { display: flex; align-items: baseline; gap: 5px; white-space: nowrap; }
 .ov-name { font-size: 12px; color: #64748b; }
+/* [AI-2026-10-08 东哥需求] 名称后跟合约代码小字（GC/ES/NQ/NK…），悬停显示新浪原始代码（hf_GC） */
+.ov-code { font-size: 10px; color: #94a3b8; font-weight: 600; margin-left: 2px; letter-spacing: 0.2px; cursor: help; }
 .ov-price { font-size: 13px; font-weight: 700; color: #1e293b; font-variant-numeric: tabular-nums; }
 .ov-pct { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .ov-up { color: var(--co-up); }

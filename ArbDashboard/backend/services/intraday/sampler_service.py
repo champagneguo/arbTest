@@ -215,24 +215,28 @@ class IntradaySamplerService:
                         continue
                     
                     # 过滤掉A股ETF代码（6位纯数字或带SZ/SH前缀）
+                    # [AI-2026-10-08 方案B] 采样取价集合只放真实可订阅的裸 ETF 符号。
+                    # '^GLD-EU' 这类 ^ 区域快照符号（Woody 合成，非交易所真实标的）不进采样清单，
+                    # 折叠成裸符号再入集合（'^GLD-EU'→'GLD'），避免对不存在的合成符号走实时盘口取价
+                    # （此前 ^GLD-EU 与 GLD 各采一次、价格完全相同，纯属冗余且语义错误）。
                     clean_symbol = symbol.lstrip('^')
-                    base_sym = clean_symbol
+                    base_symbol = clean_symbol
                     for suffix in ['-EU', '-JP', '-HK']:
-                        if base_sym.endswith(suffix):
-                            base_sym = base_sym[:-len(suffix)]
+                        if base_symbol.endswith(suffix):
+                            base_symbol = base_symbol[:-len(suffix)]
                             break
-                            
+
                     if clean_symbol.isdigit() and len(clean_symbol) == 6:
                         continue
                     if symbol.upper().startswith(('SZ', 'SH')):
                         continue
-                    
+
                     # [核心安全阀解除] 白名单限制已废除
                     # 因为混合基金的重负载美股(TSMC, NVDA等)已经硬路由至富途分流
                     # 剩下的核心套利ETF(GLD, USO, XOP等)不到20只，盈透(IB)完全可以全量接管夜盘流式订阅
-                    
-                    # 添加到待采集集合
-                    us_etf_symbols.add(symbol)
+
+                    # 添加到待采集集合（裸符号，去重）
+                    us_etf_symbols.add(base_symbol)
             
             logger.info(f"📈 采样服务需要采集的美股ETF: {len(us_etf_symbols)} 只 ({', '.join(list(us_etf_symbols)[:5])})")
             
