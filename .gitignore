@@ -36,6 +36,13 @@ Proxy.bat
 # 交易信号检测 / 前端下单逻辑（不传；traders/ 目录经东哥确认可公开，已解除排除）
 **/signal_detector.py
 **/useOrderLogic.js
+# 交易/账本/策略模块（开源治理 014：10-08 移出公开跟踪；磁盘保留、本地照常运行）
+ArbDashboard/backend/services/ledger_service.py
+ArbDashboard/frontend/src/api/ledgerApi.ts
+ArbDashboard/frontend/src/components/ManualTradeSection.vue
+ArbDashboard/frontend/src/components/TradeWorkbench.vue
+ArbDashboard/frontend/src/views/AutoTrade.vue
+ArbDashboard/frontend/src/views/Ledger.vue
 
 # --- 日志（不传）---
 *.log
