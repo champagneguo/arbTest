@@ -1,15 +1,15 @@
 @echo off
-title ArbNext Dashboard Launcher
+title ArbTest Dashboard Launcher
 
 :: [AI-2026-08-20] 启动前确认客户端已开：Enter 继续 / Esc 退出批处理
-powershell -NoProfile -Command "$Host.UI.RawUI.FlushInputBuffer(); Write-Host ''; Write-Host '【启动前检查】请先确保以下客户端已启动：' -ForegroundColor Yellow; Write-Host '   - IB Gateway  (美股行情)' -ForegroundColor White; Write-Host '   - 富途 OpenD  (外盘 ETF 10档)' -ForegroundColor White; Write-Host '   - 通达信      (A股盘口)' -ForegroundColor White; Write-Host '   - 银河 QMT   (LOF 下单通道)' -ForegroundColor White; Write-Host ''; Write-Host '按 [Enter] 确认已启动并继续, 按 [Esc] 退出去启动客户端' -ForegroundColor Cyan; while($true){$k=$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown'); if($k.VirtualKeyCode -eq 13){break} if($k.VirtualKeyCode -eq 27){exit 1}}"
+powershell -NoProfile -Command "$Host.UI.RawUI.FlushInputBuffer(); Write-Host ''; Write-Host '【启动前检查】请先确保以下客户端已启动：' -ForegroundColor Yellow; Write-Host '   - IB Gateway  (美股行情)' -ForegroundColor White; Write-Host '   - 富途 OpenD  (外盘 ETF 10档)' -ForegroundColor White; Write-Host '   - 通达信      (A股盘口)' -ForegroundColor White; Write-Host ''; Write-Host '按 [Enter] 确认已启动并继续, 按 [Esc] 退出去启动客户端' -ForegroundColor Cyan; while($true){$k=$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown'); if($k.VirtualKeyCode -eq 13){break} if($k.VirtualKeyCode -eq 27){exit 1}}"
 if errorlevel 1 (
   echo [已取消] 你选择退出。请启动上述客户端后重新运行本批处理。
   exit /b
 )
 
 echo ========================================
-echo  Starting ArbNext Unified Dashboard...
+echo  Starting ArbTest Unified Dashboard...
 echo ========================================
 
 set "SCRIPT_DIR=%~dp0"
@@ -55,7 +55,7 @@ powershell -NoProfile -Command "for($i=0;$i -lt 10;$i++){ if(-not (Get-NetTCPCon
 :: Start Backend (STRICTLY project venv — 禁止回退到系统/WorkBuddy python，否则 IB/富途/冻结调度器缺失依赖静默失效)
 echo [1/2] Starting Backend (port 8000)...
 if exist "%PY%" (
-  start "ArbNext Backend" cmd /k "cd /d %BACKEND% && %PY% main.py"
+  start "ArbTest Backend" cmd /k "cd /d %BACKEND% && %PY% main.py"
 ) else (
   echo [FATAL] 找不到项目虚拟环境解释器: %PY%
   echo [FATAL] 请勿回退到系统 python（缺 ibapi/apscheduler 会导致 IB 行情与冻结调度器失效）
@@ -70,7 +70,7 @@ timeout /t 8 /nobreak > nul
 
 :: Start Frontend
 echo [2/2] Starting Frontend (port 5173)...
-start "ArbNext Frontend" cmd /k "cd /d %FRONTEND% && npm run dev"
+start "ArbTest Frontend" cmd /k "cd /d %FRONTEND% && npm run dev"
 
 echo.
 echo ========================================

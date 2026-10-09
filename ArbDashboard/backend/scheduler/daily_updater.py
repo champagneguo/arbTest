@@ -1972,12 +1972,18 @@ class DailyUpdater(BaseApp):
                     #   QDII欧美(usd，跟美股有时差) → T价 / T-1净值(prev_nav)
                     #   QDII亚洲(hkd)/QDII日本(jpy)/国内LOF(none，无时差) → T价 / T净值(nav 同日)
                     # ⚠️ 严禁统一成 T-1：曾误改导致 QDII亚洲/日本/国内LOF 溢价口径错（严重错误，见 AGENTS.md TOP 2）
+                    # [AI-2026-10-08 东哥抓 ping-pong] premium 精度口径统一为 **4 位小数**，公式结构也
+                    #   与其余三个写手逐位对齐 —— 采集端 `_safe_save_fund_data`(round 4)、盘后对账
+                    #   `fund_reconcile`(round 4)、step10 `arbcore/calculators/static_valuation.py`
+                    #   全部是 `round((price - denom)/denom*100, 4)`。此前本处写「全精度 + (price/nav-1)*100」，
+                    #   与上述三者浮点 ULP 级差异 ⇒ 下方 `_close(_, _, eps=1e-9)` 每轮都判「不等」
+                    #   ⇒ 同一批行被反复 UPDATE（实测每轮约 24 行、数值等价）。统一后 `_close` 恒真、零重写。
                     premium = None
                     if price and float(price) > 0:
                         if fx_type == 'usd' and prev_nav and float(prev_nav) > 0:
-                            premium = (float(price) / float(prev_nav) - 1) * 100
+                            premium = round((float(price) - float(prev_nav)) / float(prev_nav) * 100, 4)
                         elif float(nav) > 0:
-                            premium = (float(price) / float(nav) - 1) * 100
+                            premium = round((float(price) - float(nav)) / float(nav) * 100, 4)
 
                     # 估值误差
                     calibration = (static_val / float(nav) - 1) * 100 if float(nav) > 0 else None
@@ -2005,6 +2011,83 @@ class DailyUpdater(BaseApp):
                         "WHERE fund_code=? AND date=?",
                         (static_val, premium, index_pct, calibration, rt_premium,
                          fund_code, date))
+                    if cursor.rowcount > 0:
+                        count += 1
+
+                # [AI-2026-10-08 东哥] 补算「官方净值尚未公布的最近交易日」(T-1) 的静态估值。
+                #   上面主循环的 fund_rows 查询带 `nav IS NOT NULL` ⇒ 最新那个只有收盘价、
+                #   净值未出的交易日根本不进循环 ⇒ static_val 恒留空 ⇒ 历史记录页最新一行
+                #   「估值」永远空白（如 513080 法国ETF 2026-09-30）。用「最近已公布净值
+                #   × (指数比 × 汇率比)」向前推一步补上；溢价 premium / 校准 calibration
+                #   依赖当日官方净值 ⇒ 保持 NULL（宁缺勿假，与 159687 两步链同哲学）。
+                #   范围限「最后一个已公布净值日之后」⇒ 天然只覆盖 1~2 个待补交易日。
+                _pending = []
+                try:
+                    cursor.execute(
+                        "SELECT date, static_val, index_pct FROM unified_fund_history "
+                        "WHERE fund_code = ? AND nav IS NULL AND price IS NOT NULL "
+                        "AND date > (SELECT MAX(date) FROM unified_fund_history "
+                        "            WHERE fund_code = ? AND nav IS NOT NULL) "
+                        "ORDER BY date", (fund_code, fund_code))
+                    _pending = cursor.fetchall()
+                except Exception:
+                    _pending = []
+                for _pdate, _p_ex_static, _p_ex_idxpct in _pending:
+                    _p_idx = idx_data.get(_pdate)
+                    if _p_idx is None or float(_p_idx) <= 0:
+                        continue  # 当日指数无数据（指数市场休市 / 指数源缺口）⇒ 不推
+                    cursor.execute(
+                        "SELECT date, nav FROM unified_fund_history "
+                        "WHERE fund_code = ? AND date < ? AND nav IS NOT NULL "
+                        "ORDER BY date DESC LIMIT 1", (fund_code, _pdate))
+                    _p_prev = cursor.fetchone()
+                    if not _p_prev or not _p_prev[1] or float(_p_prev[1]) <= 0:
+                        continue
+                    _p_prev_date, _p_prev_nav = _p_prev
+                    # 基准日指数（同主循环：允许回看 7 天内最近有数据的交易日，超窗 continue）
+                    _p_lookup = _p_prev_date
+                    if _p_lookup not in idx_data:
+                        _p_cand = sorted([d for d in idx_data.keys() if d < _p_lookup], reverse=True)
+                        _p_lookup = _p_cand[0] if _p_cand else None
+                        if _p_lookup is not None:
+                            try:
+                                _p_gap = (datetime.strptime(_p_prev_date, '%Y-%m-%d')
+                                          - datetime.strptime(_p_lookup, '%Y-%m-%d')).days
+                            except Exception:
+                                _p_gap = 0
+                            if _p_gap > 7:
+                                _p_lookup = None
+                    if _p_lookup is None:
+                        continue
+                    _p_prev_idx = idx_data.get(_p_lookup)
+                    if not _p_prev_idx or float(_p_prev_idx) <= 0:
+                        continue
+                    # 汇率比率（与主循环同口径：德/法基金用 eur_cny_mid，缺失即 continue）
+                    _p_fx_ratio = 1.0
+                    if fx_type != 'none':
+                        _p_fx_col = {'usd': 'usd_cny_mid', 'jpy': 'jpy_cny_mid',
+                                     'hkd': 'hkd_cny_mid'}.get(fx_type, 'usd_cny_mid')
+                        if fx_type == 'usd' and fund_code in EUR_FUND_CODES:
+                            _p_fx_col = 'eur_cny_mid'
+                        cursor.execute(f"SELECT {_p_fx_col} FROM exchange_rate WHERE date = ?", (_pdate,))
+                        _p_cf = cursor.fetchone()
+                        cursor.execute(f"SELECT {_p_fx_col} FROM exchange_rate WHERE date = ?", (_p_lookup,))
+                        _p_pf = cursor.fetchone()
+                        _p_cv = _p_cf[0] if _p_cf and _p_cf[0] else None
+                        _p_pv = _p_pf[0] if _p_pf and _p_pf[0] else None
+                        if _p_cv and _p_pv and _p_pv > 0:
+                            _p_fx_ratio = _p_cv / _p_pv
+                        else:
+                            continue
+                    _p_idx_ratio = float(_p_idx) / float(_p_prev_idx)
+                    _p_static = float(_p_prev_nav) * (1 + pos_ratio * (_p_idx_ratio * _p_fx_ratio - 1))
+                    _p_idx_pct = (_p_idx_ratio - 1) * 100
+                    if _close(_p_static, _p_ex_static) and _close(_p_idx_pct, _p_ex_idxpct):
+                        continue  # 无变化，跳过写回
+                    cursor.execute(
+                        "UPDATE unified_fund_history SET static_val = ?, index_close = ?, index_pct = ? "
+                        "WHERE fund_code = ? AND date = ?",
+                        (_p_static, float(_p_idx), _p_idx_pct, fund_code, _pdate))
                     if cursor.rowcount > 0:
                         count += 1
 
@@ -2294,7 +2377,7 @@ if __name__ == "__main__":
     import argparse
     import subprocess
 
-    parser = argparse.ArgumentParser(description="ArbNext 日度数据流水线")
+    parser = argparse.ArgumentParser(description="ArbTest 日度数据流水线")
     parser.add_argument("--nav-only", action="store_true", help="仅更新基金净值 (step4)")
     parser.add_argument("--refresh-morning", action="store_true", help="清除上午标记后重新抓取 Woody/汇率/VPS")
     parser.add_argument("--static-valuation", action="store_true", help="仅计算静态估值 (step10 + step11)")

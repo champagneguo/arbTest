@@ -4,7 +4,8 @@
   <n-modal :show="show" preset="card" :title="modalTitle" style="width: 96vw; max-width: 96vw; height: 90vh;" @update:show="(v: boolean) => emit('update:show', v)">
     <div class="history-modal-body">
       <n-tabs v-model:value="historyView" type="segment" size="small" style="margin-bottom: 10px;">
-        <n-tab-pane name="detail" tab="估值来源" />
+        <!-- [AI-2026-10-08 东哥拍板] TAB 名随内容改：表已换成带实时价的持仓表 -->
+        <n-tab-pane name="detail" tab="持仓估值" />
         <n-tab-pane name="error" tab="历史误差" />
       </n-tabs>
 
@@ -33,10 +34,15 @@
           </div>
         </div>
 
-        <!-- 估值明细 -->
-        <div class="hd-hold-title">估值明细</div>
-        <div v-if="!holdingRows.length" style="padding: 20px; color: #94a3b8; font-size: 13px;">该基金无持仓明细数据（非季报持仓法基金）</div>
-        <n-data-table v-else :columns="holdingColumns" :data="holdingRows" size="small" bordered :row-key="(r: any) => r.sym" style="width: 100%;" />
+        <!-- 持仓实时估值（2026-10-08 东哥拍板：替换原「估值明细」表）
+             数据源 = useValuationCalculator.holdingRows（valuation_meta 现成字段，含 realtime_quotes），
+             表格 = 共享组件 RtHoldingTable，与「实时估值」页那张表**同一个组件**（格式/配色永不走偏）。 -->
+        <RtHoldingTable
+          :rows="rtHoldingRows"
+          title="持仓实时估值"
+          hint="盘中涨跌 = 实时价 ÷ T-1收盘 − 1 · 估值影响 = 占比 × 盘中涨跌"
+          show-empty
+        />
 
         <!-- 估值算法：直接展示公式（不折叠，单行紧凑） -->
         <div class="hd-algo">
@@ -86,13 +92,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, h } from 'vue'
+import { ref, computed, watch, onUnmounted, h } from 'vue'
 import { storeToRefs } from 'pinia'
 import { NModal, NTabs, NTabPane, NDataTable, NPagination, NButton, NCollapse, NCollapseItem, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { useFundStore } from '../store'
 import { formatPrice, formatValuation, formatPremium, formatVolume, priceColor, shortDate } from '../utils'
 import { reconcileStaticVal } from '../api'
+import { useValuationCalculator } from '../composables/useValuationCalculator'
+// [AI-2026-10-08] 持仓实时价表 = 与「实时估值」页同一个组件（格式/配色/排版唯一来源）
+import { RtHoldingTable } from './shared'
 
 const props = defineProps<{
   show: boolean
@@ -132,7 +141,8 @@ const fundRow = computed<any>(() => {
 
 const modalTitle = computed(() => {
   const name = fundRow.value?.fund_name ? ` - ${fundRow.value.fund_name}` : ''
-  return `[历史记录] ${props.fundCode}${name}`
+  // [AI-2026-10-08 东哥拍板] 「[历史记录]」→「基金详情」（这已不是纯历史表，含实时持仓）
+  return `[基金详情] ${props.fundCode}${name}`
 })
 
 const isCashManagementFund = computed(() => {
@@ -183,49 +193,23 @@ const holdingSource = computed<any[]>(() => {
   }
   return out
 })
-const holdingRows = computed<any[]>(() => {
-  const rows = fundHistory.value || []
-  if (!rows.length) return []
-  const t1 = rows[1] || {}, t2 = rows[2] || {}
-  // [AI-2026-10-07 东哥要求] 按占比从高到低排列（与实时估值页一致），序号重排
-  return holdingSource.value.map((s, i) => {
-    // [AI-2026-10-07 东哥抓错] 指数行必须取指数点位（index_close/index_pct），
-    // 绝不取 `{sym}_price`：related_index 与美股 ETF 会撞名（如 DAX 指数 vs Global X DAX ETF→44.71）。
-    const isIdx = s.kind === '指数'
-    const px = (row: any) => isIdx ? (row.index_close ?? null) : (row[`${s.sym}_price`] ?? null)
-    const cg = (row: any, altKey: string) => isIdx ? (row.index_pct ?? null) : (row[`${s.sym}_${altKey}`] ?? null)
-    return {
-      idx: i + 1,
-      sym: s.sym,
-      kind: s.kind,
-      weight: s.weight,
-      t_price: s.t_price,
-      t_chg: s.t_chg,
-      t1_price: px(t1),
-      t1_chg: cg(t1, 'price_chg'),
-      t2_price: px(t2),
-      t2_chg: isIdx ? (t2.index_pct ?? null) : (t2[`${s.sym}_chg`] ?? null),
-    }
-  })
+// [AI-2026-10-08 东哥拍板] 「估值明细」→「持仓实时估值」
+// 数据源不复用本文件原有的 fundHistory 派生（那是 T 日收盘口径、盘中不跳动），
+// 改为复用 useValuationCalculator.holdingRows —— 与「实时估值」页同一 composable，
+// 其 rt 来自 valuation_meta.realtime_quotes（LOFarb 从 IB/FUTU 读），
+// ⇒ 盘中跳动，且两处口径必然一致。
+// [AI-2026-10-08 东哥二次拍板] 表格**格式/颜色/字体/排版**也要与实时估值页完全一致
+//   ⇒ 不再自建 n-data-table（那是另一套视觉语言），直接用共享组件 RtHoldingTable，
+//      与 ValuationCalculator.vue 共用同一实现 ⇒ 以后改样式只改一处，不会漂移。
+const vc = useValuationCalculator()
+const rtHoldingRows = computed<any[]>(() => {
+  if (!props.fundCode) return []
+  if (vc.fundCode.value !== props.fundCode) {
+    vc.fundCode.value = props.fundCode
+    vc.fetchValuationMeta()
+  }
+  return vc.holdingRows.value as any[]
 })
-const pctCell = (v: any) => (v == null ? '-' : Number(v).toFixed(2) + '%')
-const priceCell = (v: any) => (v == null ? '-' : formatPrice(v))
-const chgCell = (v: any) => {
-  if (v == null) return h('span', { style: 'color:var(--co-neutral)' }, '-')
-  const color = v > 0 ? 'var(--co-up)' : (v < 0 ? 'var(--co-down)' : 'var(--co-text)')
-  return h('span', { style: `color:${color};font-weight:500;` }, (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%')
-}
-const holdingColumns = computed<DataTableColumns<any>>(() => [
-  { title: '序号', key: 'idx', width: 52, align: 'center', render: (r: any) => h('span', { style: 'color:#94a3b8;' }, r.idx) },
-  { title: '估值标的', key: 'sym', width: 110, align: 'center', render: (r: any) => h('span', { style: 'font-weight:600;color:#1e293b;' }, r.sym) },
-  { title: '类型', key: 'kind', width: 64, align: 'center', render: (r: any) => h('span', { style: `font-size:12px;padding:1px 6px;border-radius:4px;${r.kind === '指数' ? 'background:#ECFDF5;color:#059669;' : 'background:#F1F5F9;color:#64748b;'}` }, r.kind) },
-  { title: '占比', key: 'weight', width: 80, align: 'center', render: (r: any) => h('span', { class: 'num-cell' }, pctCell(r.weight)) },
-  { title: 'T收盘价', key: 't_price', width: 100, align: 'center', render: (r: any) => priceCell(r.t_price) },
-  { title: 'T涨跌', key: 't_chg', width: 90, align: 'center', render: (r: any) => chgCell(r.t_chg) },
-  { title: 'T-1股价', key: 't1_price', width: 100, align: 'center', render: (r: any) => priceCell(r.t1_price) },
-  { title: 'T-1涨跌', key: 't1_chg', width: 90, align: 'center', render: (r: any) => chgCell(r.t1_chg) },
-  { title: 'T-2股价', key: 't2_price', width: 100, align: 'center', render: (r: any) => priceCell(r.t2_price) },
-])
 
 // 视图B：历史误差四列（日期/净值/估值/误差），每页15天（东哥拍板 2026-10-07）
 const errorPage = ref(1)
@@ -362,13 +346,26 @@ const fxRows = computed<any[]>(() => {
 
 // 弹窗打开/切换基金：重置视图 + 拉历史；切换 fundCode 也重拉，避免沿用上一支基金的持仓/汇率（串显）
 watch([() => props.show, () => props.fundCode], ([v]) => {
-  if (!v) return
+  if (!v) {
+    // 弹窗关闭：停轮询（否则定时器泄漏 + 后台白刷 valuation_meta）
+    vc.stopPolling()
+    return
+  }
   historyView.value = 'detail'
   if (props.fundCode) fundStore.fetchFundHistory(props.fundCode)
   if (!(props.fund && props.fund.price != null) && tableData.value.length === 0) {
     fundStore.fetchDashboard(true).catch(() => {})
   }
+  // [AI-2026-10-08] 「T 实时价」要盘中跳动 ⇒ 开轮询（composable 自带，关闭时由上面 stopPolling 收回）
+  if (props.fundCode) {
+    vc.fundCode.value = props.fundCode
+    vc.fetchValuationMeta()
+    vc.startPolling()
+  }
 })
+
+// 组件卸载兜底停轮询
+onUnmounted(() => vc.stopPolling())
 
 // [AI-2026-08-04] 单基金「核对静态估值」：补采该基金近10日历史价格/净值
 // （级联底层ETF如VGT日价）并重算静态估值，仅影响当前基金。
@@ -439,9 +436,7 @@ const reconcileStaticValHandler = async () => {
 .hd-fx-tag { font-size: var(--co-fs-xs); color: var(--co-text-2); font-weight: 600; }
 .hd-fx-val { font-size: var(--co-fs-base); font-weight: 700; color: var(--co-text); font-variant-numeric: tabular-nums; }
 .hd-fx-chg { font-size: var(--co-fs-xs); font-weight: 600; font-variant-numeric: tabular-nums; }
-.hd-hold-title {
-  font-size: var(--co-fs-title); font-weight: 700; color: var(--co-text); margin: 4px 0 8px 2px;
-}
+/* [AI-2026-10-08] .hd-hold-title 已随持仓表迁到共享组件 RtHoldingTable 内（其 .rt-hold-head） */
 .hd-note { font-size: var(--co-fs-xs); color: var(--co-text-3); margin-top: 8px; }
 .hd-error-foot {
   display: flex; align-items: center; gap: 12px;

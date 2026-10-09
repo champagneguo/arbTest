@@ -33,9 +33,12 @@ arbcore/scripts/
 agents.md
 # 本地代理/VPN 启动脚本（仅本机用，不传）
 Proxy.bat
-# 交易信号检测 / 前端下单逻辑（不传；traders/ 目录经东哥确认可公开，已解除排除）
+# 交易信号检测 / 前端下单逻辑（不传）
 **/signal_detector.py
 **/useOrderLogic.js
+# 🔴 [AI-2026-10-09 东哥拍板] arbcore/traders/ 彻底清 —— 交易内核已剥离至 LOFTrader。
+#   这三个文件不保密，但职责已归 LOFTrader，LOFarb 侧不再跟踪，防回流。
+arbcore/traders/
 # 交易/账本/策略模块（开源治理 014：10-08 移出公开跟踪；磁盘保留、本地照常运行）
 ArbDashboard/backend/services/ledger_service.py
 ArbDashboard/frontend/src/api/ledgerApi.ts

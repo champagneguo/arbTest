@@ -120,50 +120,9 @@
 
         <!-- === 持仓实时价列表（2026-10-07 东哥拍板）===
              取代原 T-2/T-1「ETF收盘价」+「标的实时价」三段内联文本。
-             数据源：valuation_meta 的 valuation_portfolio + base_data + t1_data.etfs_info + realtime_quotes，零后端改动。 -->
-        <div
-          v-if="calc.holdingRows.value.length"
-          style="border-top: 1px dashed var(--co-border-soft); padding-top: 6px; margin-top: 6px"
-        >
-          <div style="font-size: 12px; font-weight: bold; color: var(--co-text-3); margin-bottom: 4px; display: flex; align-items: baseline; gap: 10px">
-            <span>📋 持仓实时价</span>
-            <span style="font-weight: normal; font-size: 11px; color: var(--co-text-3)"
-              >盘中涨跌 = 实时价 ÷ T-1收盘 − 1 · 估值影响 = 占比 × 盘中涨跌</span
-            >
-          </div>
-          <table class="rt-hold-table">
-            <thead>
-              <tr>
-                <th>序号</th>
-                <th>标的</th>
-                <th>市场</th>
-                <th class="num">占比</th>
-                <th class="num">实时价 (T)</th>
-                <th class="num">盘中涨跌</th>
-                <th class="num">T-1收盘</th>
-                <th class="num">T-1涨跌</th>
-                <th class="num">T-2收盘</th>
-                <th class="num">估值影响</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(r, i) in calc.holdingRows.value" :key="r.symbol">
-                <td class="idx">{{ i + 1 }}</td>
-                <td class="sym">
-                  {{ r.symbol }}<span v-if="r.name" class="sym-cn">{{ r.name }}</span>
-                </td>
-                <td class="mkt"><span class="mkt-chip" :class="r.mktClass">{{ r.market }}</span></td>
-                <td class="num">{{ r.weight.toFixed(2) }}%</td>
-                <td class="num rt">{{ fmtNum(r.rt) }}</td>
-                <td class="num" :style="{ color: chgColor(r.rtChg), fontWeight: 'bold' }">{{ fmtSigned(r.rtChg) }}</td>
-                <td class="num">{{ fmtNum(r.t1) }}</td>
-                <td class="num" :style="{ color: chgColor(r.t1Chg) }">{{ fmtSigned(r.t1Chg) }}</td>
-                <td class="num">{{ fmtNum(r.t2) }}</td>
-                <td class="num" :style="{ color: chgColor(r.impact) }">{{ fmtSigned(r.impact, 3) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+             数据源：valuation_meta 的 valuation_portfolio + base_data + t1_data.etfs_info + realtime_quotes，零后端改动。
+             [AI-2026-10-08] 表格抽成共享组件 RtHoldingTable，与「基金详情」弹窗同款（避免样式漂移）。 -->
+        <RtHoldingTable :rows="calc.holdingRows.value" />
       </div>
     </n-card>
 
@@ -739,6 +698,8 @@
 import { ref, computed, watch } from 'vue'
 import { NCard, NDivider, NTag, NButton } from 'naive-ui'
 import { useValuationCalculator } from '../composables/useValuationCalculator'
+// [AI-2026-10-08] 持仓实时价表已抽为共享组件（与「基金详情」弹窗同款）
+import { RtHoldingTable } from './shared'
 import { postBpOverride, clearBpOverride as clearBpOverrideApi } from '../api'
 
 const props = defineProps<{
@@ -760,14 +721,9 @@ watch(
 )
 
 // ============================================================
-// 持仓实时价表格式化辅助
+// [AI-2026-10-08] 持仓实时价表的格式化/配色已随表格迁入共享组件 RtHoldingTable，
+//                  此处不再重复定义（唯一定义源 = shared/RtHoldingTable.vue）
 // ============================================================
-const fmtNum = (v: number | null, digits = 2) => (v === null ? '-' : v.toFixed(digits))
-const fmtSigned = (v: number | null, digits = 2) =>
-  v === null ? '-' : (v > 0 ? '+' : '') + v.toFixed(digits) + '%'
-// A股惯例：涨红跌绿；0/无数据显示中性灰
-const chgColor = (v: number | null) =>
-  v === null || v === 0 ? 'var(--co-neutral)' : v > 0 ? 'var(--co-up)' : 'var(--co-down)'
 
 // ============================================================
 // 输入事件转发（使父页面可通过 defineExpose 访问最新值）
@@ -916,75 +872,6 @@ defineExpose({
 </script>
 
 <style scoped>
-/* 持仓实时价表：紧凑 12px，数字右对齐等宽，与静态弹窗「估值明细」同视觉语言 */
-.rt-hold-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--co-fs-sm);
-  font-family: var(--co-font-sans);
-}
-.rt-hold-table th,
-.rt-hold-table td {
-  padding: 3px 8px;
-  border-bottom: 1px solid var(--co-border-soft);
-  white-space: nowrap;
-}
-.rt-hold-table thead th {
-  background: var(--co-accent-soft);
-  color: var(--co-accent-text);
-  font-weight: 600;
-  text-align: right;
-}
-.rt-hold-table thead th:first-child,
-.rt-hold-table thead th:nth-child(2),
-.rt-hold-table thead th:nth-child(3) {
-  text-align: left;
-}
-.rt-hold-table td.num {
-  font-family: var(--co-font-mono);
-  text-align: right;
-  color: var(--co-text);
-}
-.rt-hold-table td.sym {
-  font-weight: 700;
-  color: var(--co-text);
-  text-align: left;
-}
-.rt-hold-table td.idx {
-  color: var(--co-text-3);
-  font-family: var(--co-font-mono);
-  text-align: left;
-  width: 34px;
-}
-.rt-hold-table td.sym .sym-cn {
-  font-weight: normal;
-  font-size: 11px;
-  color: var(--co-text-3);
-  margin-left: 5px;
-}
-.rt-hold-table td.mkt {
-  text-align: left;
-}
-.rt-hold-table .mkt-chip {
-  display: inline-block;
-  font-size: 10px;
-  line-height: 16px;
-  padding: 0 7px;
-  border-radius: 8px;
-}
-/* 市场分类配色（淡雅同色系：浅底 + 深字，纯自起色板，互不撞色） */
-.rt-hold-table .mkt-chip.mkt-us    { background: #e8f0fb; color: #2f5d9e; }  /* 美股 · 蓝 */
-.rt-hold-table .mkt-chip.mkt-hk    { background: #e3f4f1; color: #1f7a6e; }  /* 香港 · 青 */
-.rt-hold-table .mkt-chip.mkt-jp    { background: #fbe9ee; color: #9e3b59; }  /* 日本 · 玫 */
-.rt-hold-table .mkt-chip.mkt-eu    { background: #eee9f8; color: #5b3f9e; }  /* 欧洲 · 紫 */
-.rt-hold-table .mkt-chip.mkt-cn    { background: #f6f0e0; color: #8a6d1f; }  /* A股 · 琥 */
-.rt-hold-table .mkt-chip.mkt-ft    { background: #eceff2; color: #4a5560; }  /* 期货 · 灰 */
-.rt-hold-table .mkt-chip.mkt-other { background: var(--co-accent-soft); color: var(--co-accent-text); }
-.rt-hold-table td.rt {
-  font-weight: bold;
-  color: var(--co-accent-text);
-}
-.rt-hold-table tbody tr:hover {
-  background: var(--co-surface-2);
-}
+/* [AI-2026-10-08] .rt-hold-table 全套样式已迁入共享组件 shared/RtHoldingTable.vue
+                  （scoped 样式不跨组件，故必须随表格一起搬，不能只留标签） */
 </style>

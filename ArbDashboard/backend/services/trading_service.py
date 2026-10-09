@@ -22,28 +22,11 @@ class TradingService:
         self._init_manager()
 
     def _init_manager(self):
-        # 直接从 arbcore 导入 (不需要动态引导到 LOFarb)
-        try:
-            try:
-                from arbcore.traders.trade_manager import TradeManager
-                self.trade_manager = TradeManager()
-                
-                # 检查 tdx_available 状态
-                if self.trade_manager and hasattr(self.trade_manager, 'tdx_available'):
-                    if self.trade_manager.tdx_available:
-                        logger.info("TradingService 成功挂载 TradeManager (TDX已就绪)")
-                        system_status.add_milestone("SUCCESS", "交易管理器已挂载，通达信就绪")
-                    else:
-                        logger.info("TradeManager 已挂载，通达信未登录交易账号（当前为只读看盘模式）")
-                        system_status.add_milestone("INFO", "通达信交易未登录 (不影响极速行情)")
-                else:
-                    logger.info("TradingService 成功挂载 TradeManager")
-            except ImportError:
-                logger.error("未能从 arbcore 导入 TradeManager")
-                system_status.add_milestone("ERROR", "未找到 TradeManager 核心库")
-        except Exception as e:
-            logger.error(f"TradingService 初始化 TradeManager 失败: {e}")
-            system_status.add_milestone("ERROR", f"交易引擎初始化失败: {e}")
+        # [AI-2026-10-08] 交易内核 `arbcore.traders.trade_manager` 已剥离至独立仓库 LOFTrader。
+        #   LOFarb 不再挂载 TradeManager —— 交易 / 私有模式见 LOFTrader :8001（前端 :5174）。
+        self.trade_manager = None
+        logger.info("TradingService 未挂载 TradeManager（交易内核已剥离至 LOFTrader）")
+        system_status.add_milestone("INFO", "交易内核已剥离至 LOFTrader")
 
     def get_positions(self) -> List[Dict[str, Any]]:
         """获取全量持仓"""

@@ -225,8 +225,16 @@ const pagination = { pageSize: 100 }
 
 const toggleWatchlist = (code: string) => fundStore.toggleWatchlist(code)
 
+// [AI-2026-10-09 东哥拍板] 交互改为「点整行」打开基金详情弹窗（原先是点 T-1静态估值那一列）。
+//   为什么改：列级点击要求用户瞄准 82px 宽的单元格，且与列底色/副标题一起构成过重视觉编码；
+//   整行点击是看板类页面的通用直觉，也省掉列头副标题（「点击看详情」已删）。
+//   ⚠️ 副作用需知：白银「实时估值(SI)」列自带 onClick 打开**白银比价**弹窗，
+//      它是列级独立交互，与整行不冲突（点它仍开比价窗，点行其它位置才开基金详情）。
 const rowProps = (row: any) => {
-  return {}
+  return {
+    onClick: () => openHistory(row),
+    style: 'cursor: pointer'
+  }
 }
 
 const fetchData = async (isSilent = false) => {
@@ -347,8 +355,14 @@ const allColumns: DataTableColumns<any> = [
         style: canAnalyze
           ? { background: 'var(--co-accent-soft)', color: 'var(--co-accent-text)', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontWeight: '600' }
           : { cursor: 'default' },
+        // [AI-2026-10-09] 整行点击上线后必须 stopPropagation：
+        //   本列（白名单内基金）是跳「季报持仓分析」的独立入口，
+        //   不阻断的话点基金名会同时弹基金详情 + 跳转，行为冲突。
         onClick: canAnalyze
-          ? () => { router.push({ path: '/holding-analysis', query: { code: row.fund_code, name: row.fund_name } }) }
+          ? (e: MouseEvent) => {
+              e.stopPropagation()
+              router.push({ path: '/holding-analysis', query: { code: row.fund_code, name: row.fund_name } })
+            }
           : undefined,
         title: canAnalyze ? '查看季报持仓分析' : undefined,
       }, cleanFundName(row.fund_name))
@@ -368,18 +382,20 @@ const allColumns: DataTableColumns<any> = [
     }
   },
   {
+    // [AI-2026-10-09 东哥拍板] 去掉「LOFTrader下单」副标题：
+    //   本列已取消点击，副标题既占高度又指向别的系统，纯误导 ⇒ 只留主标题。
     title: () => h('div', { class: 'col-title-wrapper' }, [
-      h('div', { style: 'font-size: 12px; font-weight: bold;' }, '实时估值'),
-      h('div', { style: 'font-size: 9px; color: #64748b; margin-top: 1px;' }, '点击进实盘')
+      h('div', { style: 'font-size: 12px; font-weight: bold;' }, '实时估值')
     ]),
     key: 'rt_val_display', width: 80, align: 'center',
-    className: 'col-rt-val',
+    // [AI-2026-10-09] className 'col-rt-val' 已随整列底色删除（无任何 css 引用）⇒ 一并移除
     render(row: any) {
       // [AI-2026-08-20] 盘后(≥15:00)实时估值无意义，优先显示"冻"标签
-      const canEnter = ['黄金原油', 'QDII欧美', 'QDII日本', '白银'].includes(row.category)
-      const onClick = canEnter ? () => router.push({ path: '/lazymode', query: { code: row.fund_code, name: row.fund_name } }) : undefined
-      const cellCls = canEnter ? 'num-cell strong clickable-cell' : 'num-cell strong'
-      const tip = canEnter ? undefined : '暂不支持（非可套利分类）'
+      // 🔴 [AI-2026-10-08 东哥拍板] 本列不再跳转 —— 「实时估值计算器」已整页迁到 LOFTrader，
+      //    LOFarb 此处只剩看板/估值权威，交易操作一律在 LOFTrader(:5174) 做。
+      const onClick = undefined
+      const cellCls = 'num-cell strong'
+      const tip = '实时估值 · 下单/测算请到 LOFTrader 实盘下单页'
       let top: any
       if (row.rt_frozen) {
         top = h('span', { class: cellCls + ' frozen-cell', onClick, title: tip || '收盘冻结估值' }, [
@@ -436,17 +452,23 @@ const allColumns: DataTableColumns<any> = [
     render(row: any) { return h(NText, { depth: 3, class: 'date-cell' }, { default: () => shortDate(row.nav_date) }) }
   },
   {
+    // [AI-2026-10-09 东哥拍板] 列标题去掉「点击看详情」副标题：
+    //   交互已从「点某一列」改成「点整行」，副标题写「点击…」既占高度又会让人以为是列级交互。
+    //   保留 col-title-wrapper 单行居中样式，与其它列标题对齐。
     title: () => h('div', { class: 'col-title-wrapper' }, [
-      h('div', { style: 'font-size: 12px; font-weight: bold;' }, 'T-1静态估值'),
-      h('div', { style: 'font-size: 9px; color: #64748b; margin-top: 1px;' }, '点击看历史记录')
+      h('div', { style: 'font-size: 12px; font-weight: bold;' }, 'T-1静态估值')
     ]),
     key: 'static_val_display', width: 82, align: 'center',
-    className: 'col-static-val',
+    // [AI-2026-10-09] className 'col-static-val' 已随整列底色删除（无任何 css 引用）⇒ 一并移除
+    // [AI-2026-10-09 东哥拍板] 列级 onClick 已移除 —— 改由 rowProps 整行触发。
+    //   保留 clickable-cell 让数值仍显示为可点样式（hover 下划线），视觉上引导「这行能点」。
+    //   ⚠️ 历史背景：此前这里必须有 stopPropagation（LOFTrader 侧曾给 tr 加跳转），
+    //      现两侧 rowProps 均为「打开基金详情」这一同一个动作，无需再阻断冒泡。
     render(row: any) {
       const val = formatValuation(row.static_val)
       const top = h('span', {
         class: 'num-cell strong clickable-cell',
-        onClick: () => { selectedFund.value = row; showHistoryModal.value = true; fundStore.fetchFundHistory(row.fund_code) }
+        title: '点击该行查看基金详情'
       }, val)
       // [2026-09-29] 原油三基金：换行追加我们的季报持仓口径 T-1 静态估值(hsv)
       const oil = oilHoldingMap.value[row.fund_code]
@@ -792,7 +814,10 @@ const columns = computed<DataTableColumns<any>>(() => {
     cols.splice(staticPremIndex + 1, 0, 
       { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时成交价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0)')]), key: 'ag0_price', width: 100, align: 'center', render(row: any) { return h('span', { class: 'num-cell' }, row.ag0_price ? row.ag0_price.toFixed(0) : '-') } },
       { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '昨结算价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0)')]), key: 'ag0_settlement', width: 100, align: 'center', render(row: any) { return h('span', { class: 'num-cell muted' }, row.ag0_settlement ? row.ag0_settlement.toFixed(0) : '-') } },
-      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时估值'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(SI)')]), key: 'si_val', width: 100, align: 'center', className: 'col-si-val', render(row: any) { return h('span', { class: 'num-cell clickable-cell', style: { cursor: 'pointer', color: '#2563eb' }, onClick: () => { showSilverRatioModal.value = true } }, row.si_val != null ? row.si_val.toFixed(4) : '-') } },
+      // [AI-2026-10-09 东哥拍板] 白银比价弹窗记录为待修项。
+      //   本列是**列级独立交互**，整行点击上线后必须 stopPropagation，
+      //   否则点它会同时弹「白银比价」+「基金详情」两个窗（叠在一起）。
+      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时估值'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(SI)')]), key: 'si_val', width: 100, align: 'center', render(row: any) { return h('span', { class: 'num-cell clickable-cell', style: { cursor: 'pointer', color: '#2563eb' }, onClick: (e: MouseEvent) => { e.stopPropagation(); showSilverRatioModal.value = true } }, row.si_val != null ? row.si_val.toFixed(4) : '-') } },
       { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时溢价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(SI)')]), key: 'si_premium', width: 95, align: 'center', render(row: any) { const v = row.si_premium; if (v == null) return '-'; return h('span', { class: 'num-cell', style: { color: priceColor(v) } }, formatPremium(v)) } }
     )
   }
@@ -1091,29 +1116,14 @@ const tableScrollX = computed(() => {
   color: var(--co-text-3);
 }
 
-/* 名称列不再整列着色：仅白名单内原油基金由行内 style 显示淡蓝底 chip（见 allColumns 渲染），
-   其余基金保持与其它列一致的无底色，避免误导"可点击"。 */
-:deep(.n-data-table-tr:nth-child(even) .n-data-table-td.col-rt-val),
-:deep(.n-data-table-tr:nth-child(odd) .n-data-table-td.col-rt-val) {
-  background-color: var(--co-rt-bg) !important;
-}
-:deep(.n-data-table-tr:nth-child(even) .n-data-table-td.col-static-val),
-:deep(.n-data-table-tr:nth-child(odd) .n-data-table-td.col-static-val) {
-  background-color: var(--co-static-bg) !important;
-}
-:deep(.n-data-table-tr:nth-child(even) .n-data-table-td.col-si-val),
-:deep(.n-data-table-tr:nth-child(odd) .n-data-table-td.col-si-val) {
-  background-color: var(--co-si-bg) !important;
-}
-:deep(.n-data-table-th.col-rt-val) {
-  background-color: var(--co-rt-head) !important;
-}
-:deep(.n-data-table-th.col-static-val) {
-  background-color: var(--co-static-head) !important;
-}
-:deep(.n-data-table-th.col-si-val) {
-  background-color: var(--co-si-head) !important;
-}
+/* [AI-2026-10-09 东哥拍板] 删除「实时估值 / T-1静态估值 / 雪山机构估值」三列的整列底色。
+   取证结论（不是猜的）：这三个 className + 对应 CSS 变量注释都写着「历史误差·…列底」，
+   是 2026-10-07 抽 FundHistoryModal 组件之前的旧设计残留 —— 弹窗抽走后
+   `grep col-rt-val|col-static-val|col-si-val` 只剩本文件，**再无第二处使用**。
+   即：底色刷的是主看板，却沿用着「弹窗内区分列」的过期意图。
+   保留三色本意是让读者一眼区分三类估值口径，但这层视觉编码过重、反而像"这几列可以点"
+   （实时估值列其实早已取消点击，只剩静态估值列可点）。
+   ⇒ 三列底色 + 表头底色一并删除，回到 naive-ui 默认斑马纹。 */
 
 /* [交换位置] 时钟 + 汇率样式 */
 .date { font-size: 11px; color: #7b8a9b; }

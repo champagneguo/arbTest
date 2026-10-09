@@ -20,7 +20,7 @@
         >
           ARB
         </n-avatar>
-        <span v-if="!collapsed" class="logo-text">ArbNext</span>
+        <span v-if="!collapsed" class="logo-text">ArbTest</span>
       </div>
       
       <div style="flex-grow: 1; overflow-y: auto;">
@@ -248,17 +248,16 @@ const menuOptions = [
     key: 'etf-rotation'
   },
   {
-    label: () => h(RouterLink, { to: '/penetration' }, { default: () => '穿透分析' }),
+    label: () => h(RouterLink, { to: '/penetration' }, { default: () => '原油穿透' }),
     key: 'penetration'
   },
   {
     label: () => h(RouterLink, { to: '/settings' }, { default: () => '系统配置' }),
     key: 'settings'
-  },
-  {
-    label: () => h(RouterLink, { to: '/maintenance' }, { default: () => '后台维护' }),
-    key: 'maintenance'
   }
+  // [AI-2026-10-09 东哥拍板] 「后台维护」整页迁至 LOFTrader(:5174)：
+  //   导出 / 补采 / 重算 属**人工运维交互**，只有本机跑得起来，ARM 展示副本上无意义。
+  //   数据侧能力不变 —— 页面仍在 LOFarb :8000，本机只是经 lofarb_proxy 透传调用。
 ]
 </script>
 

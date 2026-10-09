@@ -114,7 +114,7 @@ console_handler.setFormatter(ColorFormatter(log_format))
 
 # Configure Root Logger
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
-logger = logging.getLogger("ArbNext")
+logger = logging.getLogger("ArbTest")
 
 # ============================================================
 # [AI-2026-09-03] stdout/stderr 落盘（消除 print 诊断盲区）
@@ -262,14 +262,16 @@ try:
     from services.system_status_service import system_status
     from services.intraday.sampler_service import IntradaySamplerService
     from services.dashboard_snapshot_service import DashboardSnapshotService
-    from services.trading_service import TradingService
+    # [AI-2026-10-08] TradingService 已剥离至 LOFTrader（交易内核不再由 LOFarb 持有）
     from services.config_manager_service import ConfigManagerService
     from services.ledger_service import LedgerService
     from services.etf_rotation_service import ETFRotationService
     from services.holding_service import HoldingService
 
-    # [AI-2026-08-22] 旧版文件型信号监测引擎已废弃删除（single source of truth = DB 驱动 rule_engine）
-    auto_trade_runner = None
+    # [AI-2026-10-09 东哥拍板] 删掉恒 None 的死变量 `auto_trade_runner`（2026-08-22 起
+    #   旧文件型信号引擎已废弃，策略引擎归 LOFTrader :8001 的 rule_engine 独占）。
+    #   原写法 `auto_trade_runner = None` + lifespan 里 `if auto_trade_runner: ...stop()`
+    #   是永假分支，留着只会让人误以为 LOFarb 还持有自动交易。
 
     logger.info("Core modules imported successfully")
 except Exception as e:
@@ -317,33 +319,19 @@ def _print_data_source_banners():
             logger.info(f"{label} 连接正常")
             system_status.add_milestone("SUCCESS", f"{label} 连接正常")
         else:
-            logger.info(f"{label} 待连接")
-            system_status.add_milestone("INFO", f"{label} {hint}")
+            # [AI-2026-10-09 东哥拍板] 未连接属**异常态**（连接正常才是 INFO）
+            #   ⇒ 升 WARNING + ⚠️ 前缀，避免刷屏时被当成常态静默滑过
+            logger.warning(f"⚠️ {label} 待连接")
+            system_status.add_milestone("WARNING", f"{label} {hint}")
 
 # 2. Initialize Services with DB instance
 config_service = ConfigService(db)
-# [V4.5 紧急隔离重构] 采用主从架构动态判断交易服务
-if lof_is_running or DASHBOARD_MODE:  # [AI-2026-08-02] 看板模式也禁用交易服务
-    trading_service = None
-    logger.warning("[主从架构] 已禁用交易服务(TradingService)，以避免与运行中的主程序冲突。")
-else:
-    try:
-        # 如果主程序没运行，尝试启动交易服务 (仅供测试或单机模式)
-        from services.trading_service import TradingService
-        trading_service = TradingService(db)
-        
-        # [V4.7] 修改：放开通达信强制绑定限制，允许系统在只有 QMT 的情况下启动
-        if sys.platform == "win32" and (not trading_service.trade_manager or not getattr(trading_service.trade_manager, 'tdx_available', False)):
-            logger.warning("交易通道部分受限 (未检测到通达信登录)")
-            print("\n提示: tdx_available = False (如果您仅使用 QMT 交易，这完全正常)。系统将继续启动...\n")
-        else:
-            logger.info("交易服务已就绪 (独立模式)")
-    except SystemExit:
-        logger.warning("交易服务初始化被中止 (SystemExit)，系统继续运行，交易功能不可用。")
-        trading_service = None
-    except Exception as e:
-        logger.error(f"交易服务启动失败: {e}")
-        trading_service = None 
+# [AI-2026-10-08] 交易内核剥离（第 5 步）：TradeManager / TradingService / LazyTrader /
+#   RuleEngine / SmartOpenMonitor 全部迁至独立仓库 LOFTrader（后端 :8001 / 前端 :5174）。
+#   LOFarb 自此为纯「数据 + 估值 + 看板」节点，恒不挂载任何交易组件 ——
+#   同时根治「两进程各持一个 RuleEngine 读同一规则表」的双下单风险。
+trading_service = None
+logger.info("[交易剥离] LOFarb 不挂载 TradingService（交易见 LOFTrader :8001）")
 _active_watchlist = []
 _nav_last_updated = {"time": None, "date": None}
 _nav_scheduled_today_date = ""
@@ -403,68 +391,23 @@ except (ImportError, NameError) as e:
     export_service = None
     logger.info(f"Private export plugins not found or initialization failed: {e}")
 
-try:
-    from private.lazy_trader import lazy_trader_instance
-    if DASHBOARD_MODE:
-        # [AI-2026-08-02] 看板模式：仅加载不注入任何实盘驱动，纯展示（下单接口因无 driver 安全失败）
-        logger.info("[DASHBOARD_MODE] Lazy Trader 仅加载不注入驱动（看板纯展示）")
-    else:
-        # 注入实盘驱动
-        ib_reader = getattr(market_data_service, 'ib_reader', None)
-        galaxy_qmt = None
-        guojin_qmt = None
-        if getattr(market_data_service, 'realtime_manager', None):
-            rt = market_data_service.realtime_manager
-            galaxy_qmt = rt.active_fetchers.get('galaxy')
-            guojin_qmt = rt.active_fetchers.get('guojin')
-        lazy_trader_instance.inject_drivers(ib_reader=ib_reader, galaxy_qmt=galaxy_qmt, guojin_qmt=guojin_qmt)
-        # [AI-2026-07-15] 注入自动开仓所需服务
-        lazy_trader_instance.inject_services(fund_service=fund_service, trading_service=trading_service)
-        logger.info("✅ Lazy Trader plugin loaded.")
-except (ImportError, NameError) as e:
-    lazy_trader_instance = None
-    logger.info(f"Lazy Trader plugin not found: {e}")
+# [AI-2026-10-08] LazyTrader 随交易内核剥离至 LOFTrader（交易见 :8001）。
+lazy_trader_instance = None
 
-# Lazy Simulator (weekend mock data)
-try:
-    from private.lazy_simulator import lazy_simulator_instance
-    logger.info("Lazy Simulator loaded.")
-except (ImportError, NameError) as e:
-    lazy_simulator_instance = None
-    logger.info(f"Lazy Simulator not found: {e}")
+# [AI-2026-10-09 东哥拍板] Lazy Simulator（周末 mock 数据）随交易域剥离至 LOFTrader。
+#   该能力本质是「造信号驱动下单演练」，属交易侧；LOFTrader :8001 已实现并被前端调用。
+#   LOFarb 前端零调用 ⇒ 此处连同 private/lazy_simulator.py 一并移除（少一个常驻线程）。
+lazy_simulator_instance = None
 
-# [AI-2026-07-01] 导入 DB 驱动规则引擎（LazyMode 自动化规则）
-if DASHBOARD_MODE:
-    # [AI-2026-08-02] 看板模式：不加载规则引擎（禁用真实下单）
-    rule_engine = None
-    logger.info("[DASHBOARD_MODE] RuleEngine 已禁用（看板纯展示）")
-else:
-    try:
-        from services.rule_engine import rule_engine
-        # 注入依赖
-        rule_engine.inject(fund_service=fund_service, lazy_trader=lazy_trader_instance, trading_service=trading_service, db_path=tran_db_path, master_db_path=root_db_path)
-        logger.info("✅ RuleEngine (DB驱动) loaded.")
-    except (ImportError, NameError) as e:
-        rule_engine = None
-        logger.info(f"RuleEngine not found: {e}")
+# [AI-2026-10-08] RuleEngine（DB 驱动策略引擎）随交易内核剥离至 LOFTrader。
+#   唯一策略引擎现由 LOFTrader :8001 持有 ⇒ 根治双进程读同一规则表的双下单风险。
+#   ⚠️ 下面 rule_engine / _smart_* / signal_detector 保留占位：main.py 里还有若干**模块级**
+#      端点函数引用它们（删名字会 NameError → 500）。这些端点本属交易域，LOFTrader 已有同名实现，
+#      LOFarb 侧不再挂载，功能只从 :5174 进入。彻底删除需连端点一起搬，本轮不做（避免大改）。
+rule_engine = None
 
-# [AI-2026-07-17] SmartOpenMonitor（智能开仓/平仓监控器）
-if DASHBOARD_MODE:
-    # [AI-2026-08-02] 看板模式：不加载 SmartMonitor（禁用开/平仓监控下单）
-    _smart_start = _smart_stop = _smart_status = _smart_update_target = None
-    logger.info("[DASHBOARD_MODE] SmartOpenMonitor 已禁用（看板纯展示）")
-else:
-    try:
-        from private.smart_open_monitor import start_monitor as _smart_start, stop_monitor as _smart_stop, get_monitor_status as _smart_status, update_monitor_target as _smart_update_target
-        # 注入依赖的全局实例
-        _smart_mds = market_data_service
-        _smart_fs = fund_service
-        _smart_ts = trading_service
-        _smart_lt = lazy_trader_instance
-        logger.info("✅ SmartOpenMonitor loaded.")
-    except (ImportError, NameError) as e:
-        _smart_start = _smart_stop = _smart_status = None
-        logger.info(f"SmartOpenMonitor not loaded: {e}")
+# [AI-2026-10-08] SmartOpenMonitor 随交易内核剥离至 LOFTrader（私有模式页见 :5174）。
+_smart_start = _smart_stop = _smart_status = _smart_update_target = None
 
 # [AI-2026-08-22] SignalDetector 已废弃删除（其僵尸端点 /api/signal_detector/* 一并移除）；
 # 唯一策略引擎为 DB 驱动的 rule_engine（见上方加载块）
@@ -472,7 +415,7 @@ signal_detector = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting ArbNext Backend lifespan...")
+    logger.info("Starting ArbTest Backend lifespan...")
     # [2026-08-27] 启动即后台同步当日分时（本地不采，ARM/AMD 采后回传；关注基金 162411/164701/161116）
     try:
         from services.intraday.arm_sync_service import ensure_synced_today
@@ -597,13 +540,11 @@ async def lifespan(app: FastAPI):
         
         asyncio.create_task(start_mds_later())
 
-        # SignalDetector（信号检测引擎 — 默认不启动，用户手动开启）
-        if signal_detector:
-            logger.info("SignalDetector 已就绪，等待用户手动启动")
-            system_status.add_milestone("INFO", "信号检测引擎就绪")
-        else:
-            logger.info("SignalDetector 未加载")
-            system_status.add_milestone("INFO", "信号检测引擎未加载")
+        # [AI-2026-10-09 东哥拍板] SignalDetector 已废弃删除（2026-08-22），
+        #   下方 `signal_detector = None` 恒为 None ⇒ 这段 if/else 是**永假的死分支**，
+        #   每启必刷两条「未加载」噪音（其中一条还塞进用户可见的 System Milestone）。
+        #   策略引擎现由 LOFTrader(:8001) 的 rule_engine 独占（避免双进程双下单）。
+        #   ⇒ 整段删除，不再打这两条日志。
 
         # 5. 定义脚本路径和 Python 查找的公共函数
         def _get_scripts_dir():
@@ -851,13 +792,10 @@ async def lifespan(app: FastAPI):
     yield
 
     # [AI-2026-08-03] 冻结调度器已改为 asyncio 任务（随进程退出自动回收），无需显式 shutdown
-    logger.info("🛠️ Shutting down ArbNext Backend...")
+    logger.info("🛠️ Shutting down ArbTest Backend...")
     await dashboard_snapshot_service.stop()
     await sampler_service.stop()
-    if signal_detector:
-        signal_detector.stop()
-    if auto_trade_runner:
-        auto_trade_runner.stop()
+    # [AI-2026-10-09] auto_trade_runner / signal_detector 两个恒 None 死变量已删（见上方 import 块注释）
     market_data_service.realtime_manager.stop()
     # [AI-2026-07-13] 先 stop_polling() 再 disconnect()，防止 polling 线程抢重连
     if market_data_service and market_data_service.ib_reader:
@@ -898,7 +836,7 @@ class _SafeJSONResponse(JSONResponse):
 #   本机（full 模式）保留，便于开发调试；ARM（DASHBOARD_MODE=1）一律 None ⇒ 404。
 _docs_kwargs = ({"docs_url": None, "redoc_url": None, "openapi_url": None}
                 if DASHBOARD_MODE else {})
-app = FastAPI(title="ArbNext API", version="1.0.0", lifespan=lifespan,
+app = FastAPI(title="ArbTest API", version="1.0.0", lifespan=lifespan,
               default_response_class=_SafeJSONResponse, **_docs_kwargs)
 
 # CORS Configuration
@@ -2961,37 +2899,13 @@ async def smart_monitor_update_target(request: Request):
         return {"status": "ok", "message": msg}
     return JSONResponse(status_code=400, content={"status": "error", "message": msg})
 
-# --- Lazy Simulator API (weekend mock data) ---
-@app.get("/api/private/lazy_simulate/status")
-async def lazy_simulate_status():
-    """Get current simulation state and history"""
-    if not lazy_simulator_instance:
-        return JSONResponse(status_code=403, content={"status": "error", "message": "Lazy Simulator not loaded"})
-    return {"status": "ok", "data": lazy_simulator_instance.get_status()}
-
-@app.post("/api/private/lazy_simulate/control")
-async def lazy_simulate_control(request: Request):
-    """Start/stop/reset simulation, or toggle forced signal"""
-    if not lazy_simulator_instance:
-        return JSONResponse(status_code=403, content={"status": "error", "message": "Lazy Simulator not loaded"})
-    try:
-        body = await request.json()
-        action = body.get("action", "status")
-        if action == "start":
-            result = lazy_simulator_instance.start()
-        elif action == "stop":
-            result = lazy_simulator_instance.stop()
-        elif action == "reset":
-            result = lazy_simulator_instance.reset()
-        elif action == "force_signal":
-            enabled = body.get("enabled", True)
-            result = lazy_simulator_instance.set_forced_signal(enabled)
-        else:
-            return JSONResponse(status_code=400, content={"status": "error", "message": f"Unknown action: {action}"})
-        return {"status": "ok", "data": result}
-    except Exception as e:
-        logger.error("[LazySim] Control error: %s", e)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+# [AI-2026-10-09 东哥拍板] 删除 /api/private/lazy_simulate/{status,control} 两个端点。
+#   理由（取证结论，非推测）：
+#     ① LOFarb 前端**零调用**（全仓 grep `lazy_simulate` 只命中 api/fundApi.ts 的两个封装函数，
+#        而这两个函数自身无任何组件 import —— 死封装）；
+#     ② 该能力已由 LOFTrader 接管并**真正在用**（LOFTrader 前端 fundApi.ts 调用同一路径，
+#        后端 trading_router.py:946+ 有完整实现）。
+#   留着只会让本机多一个常驻线程 + 一条启动噪音，且给人「LOFarb 还管幽灵模拟器」的错觉。
 
 # --- Bond ETF BP Override API ---
 @app.post("/api/bond/bp-override")

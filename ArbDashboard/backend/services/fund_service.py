@@ -2163,6 +2163,38 @@ class FundService:
                                 except Exception as e:
                                     logger.warning(f"[{code}] NK实时估值失败: {e}")
 
+                            # [AI-2026-10-08] QDII欧洲（513080 法国CAC / 513030·159561 德国DAX）：
+                            # 用欧系指数期货做实时估值。与上面的 QDII日本(NK 期货)同构 —— 把
+                            # 「基准日现货收盘 17:30 的期货价(锚点) → 当前期货价」折成单组件喂 basket_valuation。
+                            # 为什么必须用期货：欧洲现货(巴黎/柏林)当地 17:30 收盘，而对应期货交易到 22:00；
+                            # A股盘中(北京 9:30-15:00 = 当地 3:30-9:00)现货还没开盘，只能用期货估 T 日腿。
+                            # 锚点四级来源见 arbcore/fetchers/eu_futures_store.resolve_anchor
+                            # （库锚点 > 1m tick > 日线结算 > boerse-frankfurt）；缺数据 → 保持 None（前端 '-'）。
+                            if not metrics.get('rt_val') and code in EUR_FUND_CODES:
+                                try:
+                                    from arbcore.fetchers.eu_futures_store import t_day_component
+                                    eur_spot = _daily_snapshot.get('eur_cny_spot') or 0
+                                    bd_eur = calculator.get_base_data(code)
+                                    if bd_eur and eur_spot > 0:
+                                        comp = t_day_component(None, code, bd_eur.get('date'))
+                                        if comp:
+                                            rt_val = basket_valuation(
+                                                bd_eur.get('nav'), bd_eur.get('position'), [comp],
+                                                bd_eur.get('exchange_rate'), float(eur_spot), hedge=None,
+                                            )
+                                            if rt_val is not None:
+                                                metrics['rt_val'] = round(rt_val, 4)
+                                                if metrics.get('price', 0) > 0:
+                                                    metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
+                                                logger.debug(
+                                                    f"[{code}] 欧系期货实时估值: {comp['symbol']} "
+                                                    f"{comp['base_price']}→{comp['current_price']} "
+                                                    f"(anchor_from={comp.get('anchor_from')}, "
+                                                    f"delay={comp.get('delay_min')}min, base={bd_eur.get('date')}), "
+                                                    f"rt_val={rt_val:.4f}")
+                                except Exception as e:
+                                    logger.warning(f"[{code}] 欧系期货实时估值失败: {e}")
+
                             # 尝试用 trade_etf 备用源 [V10.8]
                             # basket为空时（如162411的XOP），直接用 trade_etf 获取实时ETF价格做 hedge 估值
                             # 放在 current_fx 条件外，让无basket基金也能走魔法公式

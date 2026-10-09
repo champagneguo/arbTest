@@ -106,12 +106,9 @@ provide('themeColor', primaryColor)
   --co-down-soft: #e9f5ed;     /* 跌绿·淡底 */
   --co-warn: #a9790f;          /* 警示琥珀（低饱和） */
   --co-warn-soft: #faf4e6;     /* 警示淡底 */
-  --co-rt-bg: #edf3fb;         /* 历史误差·实时估值列底（淡蓝） */
-  --co-rt-head: #dce8f5;       /* 实时估值列表头 */
-  --co-static-bg: #faf4e6;     /* 历史误差·静态估值列底 */
-  --co-static-head: #f3e8cf;   /* 静态估值列表头 */
-  --co-si-bg: #f1eff8;         /* 历史误差·雪山/机构估值列底（淡紫灰） */
-  --co-si-head: #e3dff0;       /* 雪山/机构估值列表头 */
+  /* [AI-2026-10-09 东哥拍板] 删除 --co-rt-bg/head、--co-static-bg/head、--co-si-bg/head：
+     三组「估值列整列底色」的 CSS 已随之从 Dashboard.vue 移除（残留意图见该文件注释），
+     六个变量引用归零 ⇒ 一并删掉，避免留下没人用的调色板。 */
   --co-font-sans: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
   --co-font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Consolas, monospace;
   --co-radius: 8px;
