@@ -86,3 +86,9 @@ logs/
 # --- 前端构建缓存 ---
 dist/
 .vite/
+
+# --- [AI-2026-10-10] 公开仓移除：rule_engine 拆分后的残留副本 ---
+#   交易内核已整体归 LOFTrader(private 仓)；本仓 main.py 中 rule_engine = None，
+#   该文件为死代码，但会公开暴露策略阈值 / 对冲标的映射，故取消跟踪、不再入库。
+#   唯一权威实现：LOFTrader/backend/services/rule_engine.py
+ArbDashboard/backend/services/rule_engine.py
