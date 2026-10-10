@@ -18,8 +18,9 @@ from arbcore.calculators.valuation_data_engine import resolve_method
 # [AI-2026-07-27] 统一估值核心（估值引擎+数据引擎分离）：QDII日本实时复用篮子公式，NK期货价作单组件
 from arbcore.calculators.unified_valuation import basket_valuation
 from arbcore.analysis.common import EUR_FUND_CODES
-# [2026-07-31] 收盘后冻结实时估值（15:00 快照覆盖 live 值）
-from services.realtime_freeze import apply_freeze_to_dashboard, update_rt_cache
+# [AI-2026-10-09] 冻结机制已取消（东哥拍板：程序估值与时间无关，行情展示走数据驱动）。
+# 盘后仅做「现价收敛到官方收盘」（realtime_price=price），不再有 15:00 快照覆盖/rt_frozen 标记。
+from services.realtime_freeze import apply_post_close_price_convergence
 
 # [AI-2026-07-23] 期货结算价缓存（30秒 TTL），避免前端轮询刷屏新浪
 _FUTURES_CACHE_TTL = 30
@@ -471,7 +472,6 @@ def _ensure_daily_snapshot(conn):
 _trading_day_cache = {'value': None, 'time': 0.0}
 def _is_trading_day(conn) -> bool:
     """判定今日是否为「中间价已公布的交易日」。
-
     中间价(usd/hkd/jpy_cny_mid)仅在境内交易日由央行公布；节假日/周末虽仍可能有
     即期 spot 行情，但中间价列为 NULL，且 exchange_rate 每日仍会落一行。故以"最新一行
     是否存在任一中间价"作为交易日信号，而非单纯比较日期——这样国庆等长假期
@@ -1583,8 +1583,9 @@ class FundService:
                 #   港股 00700/03690/09988 等）与「最新篮子」差集达 63 vs 54 个，
                 #   它们会被塞进下面的并发预取清单 → 走 get_realtime_quote → 触发富途订阅/取价，
                 #   白白吃正股额度（1 标的=2 额度）并拖慢整个主面板重算。
-                # 改为「每只基金自身最新日期」，口径与 sampler_service._load_db_basket /
+                # 改为「每只基金自身最新日期」，口径与 fund_basket_weights（DB 唯一权威）/
                 # market_data_service._get_futu_symbols 完全一致（单一权威）。
+                # [AI-2026-10-09] 原参照 sampler_service._load_db_basket 已随本地采样移除（分时归 ARM）。
                 basket_codes_df = pd.read_sql(
                     "SELECT b.fund_code, b.underlying_symbol FROM fund_basket_weights b "
                     "WHERE b.date = (SELECT MAX(date) FROM fund_basket_weights "
@@ -1630,6 +1631,8 @@ class FundService:
             # [AI-2026-10-08] 北京日期（供涨跌幅「昨收」判据）：显式固定 +08:00，
             #   勿用 date.today()——ARM 为 UTC，凌晨时段 UTC 日期会落后北京一天，两机口径会分叉。
             _today_bj = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+            # [AI-2026-10-09 方案A] A股交易时段判据（现价列盘中实时价覆盖的休市守卫）
+            from arbcore.utils.market_calendar import is_a_share_session
             for _, fund in funds_df.iterrows():
                 code = fund['fund_code']
                 _vf_start = time.perf_counter()  # [埋点A] 逐基金计时起点
@@ -1650,6 +1653,9 @@ class FundService:
                 # (trading_day=False，如国庆休市) 整块跳过 → 2076 行引用即 UnboundLocalError，
                 # get_unified_dashboard_data 整体失败、看板空白。提到循环顶部保证全路径有定义。
                 _basket_missing_etf = False
+                # [AI-2026-10-09] 最新有价行是否=今天（供「现价」列盘中实时价覆盖判断）
+                _price_is_today = (str(metrics_df.dropna(subset=['price']).iloc[0]['date'])[:10] == _today_bj) \
+                                  if not metrics_df.empty and not metrics_df.dropna(subset=['price']).empty else False
 
                 if not metrics_df.empty:
                     valid_navs = metrics_df[metrics_df['nav'] > 0]
@@ -1723,11 +1729,22 @@ class FundService:
                 #   严禁用腾讯实时盘中价覆盖（东哥发现：重启后端后实时 fetcher 生效，
                 #   会把盘中最新价盖到历史收盘价上，导致与官方收盘差几分钱）。
                 #   实时价单独存 realtime_price，仅供「实时溢价(rt_premium)」使用。
+                # [AI-2026-10-09 东哥拍板修正] 上述 07-29 设计有个盘中缺陷：
+                #   交易日 9:30–15:10「今日行未落库」时，DB 最新有价行是【昨日】收盘价，
+                #   「现价」列停在前一日、官方/参考溢价分子也跟着错。
+                #   现改为：**盘中（交易日 且 最新价行 date != 今天）时，「现价」price 用实时价覆盖；
+                #   盘后今日已落库（最新价行 date == 今天）则保留 DB 官方收盘价。**
+                #   实时价仍单独存 realtime_price，「实时溢价」逻辑不变。
                 if self.market_data_service and code in quotes_dict:
                     rt = quotes_dict[code]
                     p = rt.get('price')
                     if p is not None and float(p) > 0:
                         metrics['realtime_price'] = float(p)
+                        # 盘中今日未落库 → 现价列用实时价覆盖（东哥 10-09 拍板·方案A）
+                        # 休市/非交易日守卫：实时源可能残留上个交易日脏值，此时不覆盖，
+                        # 现价列回退 DB「上一交易日收盘价」（规则②），绝不显空、绝不用陈旧实时价。
+                        if trading_day and is_a_share_session() and not _price_is_today:
+                            metrics['price'] = round(float(p), 4)
                     if rt.get('amount'):
                         metrics['volume'] = rt['amount']  # 成交额（万元），主面板「成交额」列显示
                     # [2026-07-30] 实时成交量（股）→ 手；换手率 = 成交量(手) / 份额(万)，与 woody 对齐
@@ -1741,6 +1758,9 @@ class FundService:
                         rt = self.market_data_service.get_realtime_quote(code)
                         if rt and rt.get('price'):
                             metrics['realtime_price'] = float(rt['price'])
+                            # 盘中今日未落库 → 现价列用实时价覆盖（方案A + 休市守卫，规则②）
+                            if trading_day and is_a_share_session() and not _price_is_today:
+                                metrics['price'] = round(float(rt['price']), 4)
                             if rt.get('amount'):
                                 metrics['volume'] = rt['amount']  # 成交额（万元）
                             if rt.get('volume'):
@@ -1921,6 +1941,40 @@ class FundService:
                         if settlement_price > 0:
                             metrics['ag0_settlement'] = settlement_price
 
+                        # [AI-2026-10-09 东哥点名修复] 盘中实时价会被收盘后 rt_freeze 冻结成 15:00 快照
+                        # （快照取的是一盘中时点 AG0 价 ≈14700，非官方收盘 14717），参考估值因此停在前一日
+                        # 盘中值 1.6589，而非期望的官方收盘口径 1.6609（= NAV × AG0今收14717/昨结算14589）。
+                        # 与「现价」方案A 同源原则：休市后参考估值也用官方收盘，而非陈旧盘中价。
+                        # 这里在休市（盘后）且拿不到实时价时，改从 futures_daily 读当日官方收盘+今日结算，
+                        # 用「官方收盘价」当 rt_val 分子、「今日结算价」当 static_val 分子重算两条估值。
+                        if (not _ag_session_open and ag_future_price <= 0
+                                and nav_home > 0 and settlement_price > 0):
+                            try:
+                                _conn_c = self.db._get_conn()
+                                try:
+                                    _today = datetime.now().strftime('%Y-%m-%d')
+                                    _rd = _conn_c.execute(
+                                        "SELECT close_price, settle_price FROM futures_daily "
+                                        "WHERE symbol='AG0' AND date=? AND close_price>0 "
+                                        "AND settle_price>0", (_today,)
+                                    ).fetchone()
+                                    # 盘后官方收盘口径：rt_val 分子=今日官方收盘、static_val 分子=今日官方结算
+                                    if _rd:
+                                        _close, _settle = float(_rd[0]), float(_rd[1])
+                                        _rt = nav_home * (_close / settlement_price)
+                                        metrics['rt_val'] = round(_rt, 4)
+                                        if metrics.get('price', 0) > 0:
+                                            metrics['rt_premium'] = round((metrics['price'] / _rt - 1) * 100, 3)
+                                        metrics['static_val'] = round(nav_home * (_settle / settlement_price), 4)
+                                        metrics['ag0_close'] = _close
+                                        logger.debug(f"[{code}] 盘后官方收盘口径 rt_val={metrics['rt_val']} "
+                                                     f"(AG0官方收盘={_close}) static_val={metrics['static_val']} "
+                                                     f"(AG0今日结算={_settle})")
+                                finally:
+                                    _conn_c.close()
+                            except Exception as _e:
+                                logger.debug(f"[{code}] 盘后官方收盘估值计算失败: {_e}")
+
                         if ag_future_price > 0 and settlement_price > 0 and nav_home > 0:
                             # 🚀 为了让前端展示 AG0 盘口数据（仅实时成交价，休市时为空白）
                             metrics['ag0_price'] = ag_future_price
@@ -1931,10 +1985,13 @@ class FundService:
                             if metrics.get('price', 0) > 0:
                                 metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
 
-                            # 🚀 官方估值 (static_val) = 昨天净值 * (VWAP / 昨结算价)
-                            # [AI-2026-08-21 FIX] 严禁 fallback 到 NAV：官方估值与 NAV 是"对比"关系(数字近但含义不同)，
-                            # VWAP 缺失即视为无官方估值，留 None（前端显示"等待数据"），绝不用 NAV 冒充（违反 SUPREME 铁律）。
-                            if vwap > 0:
+                            # 🚀 官方估值 (static_val) = 昨天净值 × (今日结算价 / 昨结算价)
+                            # [AI-2026-10-09 东哥拍板口径] 分母=昨结算(parts[10])，分子=今日结算价：
+                            #   盘中 = VWAP(parts[9] 动态结算均价，今日结算价的盘中替身)；
+                            #   盘后(>=15:00) parts[9] 即当日官方结算价。
+                            # 所以分子直接用 vwap(=parts[9])，盘前/盘中/盘后同一公式，无需分时段。
+                            # [AI-2026-08-21] 严禁 fallback 到 NAV：VWAP 缺失即无官方估值，留 None。
+                            if vwap > 0 and settlement_price > 0:
                                 metrics['static_val'] = round(nav_home * (vwap / settlement_price), 4)
                             else:
                                 metrics['static_val'] = None
@@ -1959,6 +2016,96 @@ class FundService:
                                 metrics['si_val'] = None
                                 metrics['si_premium'] = None
 
+                    # [AI-2026-10-09] 159985 豆粕ETF华夏：大商所豆粕期货 M（新浪 nf_M0 豆粕连续）驱动。
+                    # 与 161226 白银对称：实时价/昨结算/VWAP 全部走新浪 nf_M0 单通道（东财 SSE/push2 对
+                    # 大商所 M 取不到，不强行加 SSE）。休市时段守卫：不采信实时成交价/VWAP（丢弃），
+                    # 但保留昨结算价（m0_settlement 独立展示，东哥要求）。估值口径与 161226 完全一致
+                    # （对齐文档 010 §3.2 / §4.8，东哥 10-09 拍板）：
+                    #   参考估值 rt_val     = nav(T-1) × (M实时价 / M昨结算)
+                    #   官方估值 static_val  = nav(T-1) × (M今日结算价 / M昨结算)
+                    #     分母=M昨结算(parts[10])；分子=M今日结算价，盘中用 VWAP(parts[9]) 替身、
+                    #     盘后 parts[9] 即官方结算价 —— 盘前/盘中/盘后同一公式，分子直接取 m_vwap。
+                    if code == '159985' and trading_day:
+                        from arbcore.utils.market_calendar import is_dce_open, get_previous_trading_day
+                        from arbcore.utils.sina_cache import get_sina_quotes
+                        _m_session_open = is_dce_open()
+                        m_future_price, m_settlement, m_vwap = 0.0, 0.0, 0.0
+                        try:
+                            _raw_map = get_sina_quotes(['nf_M0'])
+                            _raw = _raw_map.get('nf_M0')
+                            if _raw:
+                                _p = _raw.split(',')
+                                if len(_p) >= 11:
+                                    m_future_price = float(_p[8])     # 最新价
+                                    m_settlement   = float(_p[10])    # 昨结算价（上一交易日官方结算）
+                                    m_vwap         = float(_p[9]) if len(_p) > 9 and _p[9] else 0.0  # 动态结算均价
+                        except Exception as _e:
+                            logger.debug(f"[159985] 新浪 nf_M0 读取失败: {_e}")
+                        # 实时链路未给昨结算价 → 切 DB 备用源（futures_daily symbol='M0'，上一交易日）
+                        if m_settlement <= 0:
+                            try:
+                                _prev_td = get_previous_trading_day().strftime('%Y-%m-%d')
+                                _row = self.db._get_conn().execute(
+                                    "SELECT settle_price FROM futures_daily WHERE symbol='M0' "
+                                    "AND date=? AND settle_price>0", (_prev_td,)).fetchone()
+                                if _row and _row[0] and float(_row[0]) > 0:
+                                    m_settlement = float(_row[0])
+                                    logger.debug(f"[159985] M0 昨结算实时源缺失，改用DB={m_settlement}（{_prev_td}）")
+                            except Exception as _e:
+                                logger.debug(f"[159985] M0 昨结算 DB 备用源读取失败: {_e}")
+                        # 休市时段：丢弃实时成交价/VWAP，保留昨结算价
+                        if not _m_session_open and m_settlement > 0:
+                            m_future_price, m_vwap = 0.0, 0.0
+                        nav_home = float(metrics.get('nav', 0))
+                        if m_settlement > 0:
+                            metrics['m0_settlement'] = m_settlement   # 驱动列：M0 昨结算价（独立展示）
+                        if m_future_price > 0 and m_settlement > 0 and nav_home > 0:
+                            metrics['m0_price'] = m_future_price
+                            _rt = nav_home * (m_future_price / m_settlement)
+                            metrics['rt_val'] = round(_rt, 4)
+                            if metrics.get('price', 0) > 0:
+                                metrics['rt_premium'] = round((metrics['price'] / _rt - 1) * 100, 3)
+                        # ── 官方估值 static_val（与 161226 对称，东哥 10-09 拍板）──
+                        # 分母 = M 昨结算(parts[10])；分子 = M 今日结算价（盘中用 VWAP parts[9] 替身，
+                        # 盘后 parts[9] 即官方结算价）。盘前/盘中/盘后同一公式，分子直接取 m_vwap。
+                        # 休市时段 m_vwap 已被上方守卫置 0 → 官方估值 None（与 161226 一致）。
+                        if m_vwap > 0 and m_settlement > 0 and nav_home > 0:
+                            metrics['static_val'] = round(nav_home * (m_vwap / m_settlement), 4)
+                        else:
+                            metrics['static_val'] = None
+
+                        # [AI-2026-10-09] 159985 M0 盘后官方收盘口径（与 161226 AG0 分支对称，
+                        # 模板=fund_service.py 1943-1975）：盘中实时价会被收盘后收敛丢弃（休市守卫
+                        # 置 0），此时若 futures_daily 已落当日 M0 官方收盘+结算（16:36 才入库，
+                        # 之前查询 no-op → 前端"等待数据"，无兜底），改用官方收盘当 rt_val 分子、
+                        # 官方结算当 static_val 分子重算两条估值，并写 m0_close 供前端展示。
+                        if (not _m_session_open and m_future_price <= 0
+                                and nav_home > 0 and m_settlement > 0):
+                            try:
+                                _conn_m = self.db._get_conn()
+                                try:
+                                    _today = datetime.now().strftime('%Y-%m-%d')
+                                    _rdm = _conn_m.execute(
+                                        "SELECT close_price, settle_price FROM futures_daily "
+                                        "WHERE symbol='M0' AND date=? AND close_price>0 "
+                                        "AND settle_price>0", (_today,)
+                                    ).fetchone()
+                                    # 盘后官方收盘口径：rt_val 分子=今日官方收盘、static_val 分子=今日官方结算
+                                    if _rdm:
+                                        _m_close, _m_settle = float(_rdm[0]), float(_rdm[1])
+                                        _rt_m = nav_home * (_m_close / m_settlement)
+                                        metrics['rt_val'] = round(_rt_m, 4)
+                                        if metrics.get('price', 0) > 0:
+                                            metrics['rt_premium'] = round((metrics['price'] / _rt_m - 1) * 100, 3)
+                                        metrics['static_val'] = round(nav_home * (_m_settle / m_settlement), 4)
+                                        metrics['m0_close'] = _m_close
+                                        logger.debug(f"[{code}] 盘后官方收盘口径 rt_val={metrics['rt_val']} "
+                                                     f"(M0官方收盘={_m_close}) static_val={metrics['static_val']} "
+                                                     f"(M0今日结算={_m_settle})")
+                                finally:
+                                    _conn_m.close()
+                            except Exception as _em:
+                                logger.debug(f"[{code}] 盘后官方收盘估值计算失败: {_em}")
 
                     # 3.2 【普通国内LOF/QDII亚洲极速估值】 - 仅对无权重篮子且无trade_etf的基金使用简化指数估值
                     # [AI-2026-07-20] 有 YAML trade_etf（如161125→SPY, 161130→QQQ）的基金跳过指数估值，走3.3 ETF实时估值
@@ -2368,21 +2515,19 @@ class FundService:
 
                 result.append(fund_dict)
 
-            # [2026-07-31] ① 盘中持续缓存最后有效估值 → ② 收盘后冻结/回退覆盖 live 值并标记 rt_frozen
-            # [AI-2026-08-25] 盘后兜底：若今天官方收盘价未入库（price=NULL），先补齐再冻结/缓存，
+            # [AI-2026-10-09] 冻结机制已取消（东哥拍板：程序估值与时间无关）。
+            # 盘后只做「现价收敛到官方收盘」：hour<15 直接 return；否则 realtime_price=price。
+            # 数据缺失就保持缺失（显示"等待数据"），绝不兜底。rt_frozen 恒不写入。
+            # [AI-2026-08-25] 盘后兜底：若今天官方收盘价未入库（price=NULL），先补齐再收敛，
             # 防止前端用昨天收盘当"现价"。幂等——已写则 _step4_fetch_prices 内部跳过。
             try:
                 self._ensure_today_close_price()
             except Exception as e:
                 logger.warning(f"[盘后兜底] 获取今天收盘价失败(不影响其他): {e}")
             try:
-                update_rt_cache(result)
+                apply_post_close_price_convergence(result)
             except Exception as e:
-                logger.warning(f"[FREEZE] 更新估值缓存失败: {e}")
-            try:
-                apply_freeze_to_dashboard(result)
-            except Exception as e:
-                logger.error(f"[FREEZE] 应用冻结值失败: {e}")
+                logger.error(f"[盘后收敛] 现价收敛到官方收盘失败: {e}")
 
             logger.debug(f"Dashboard数据生成完成，共 {len(result)} 只基金")
             _prof['valuation_done'] = _t.perf_counter()  # [埋点A] 估值循环段结束

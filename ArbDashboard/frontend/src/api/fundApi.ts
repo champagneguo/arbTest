@@ -126,17 +126,6 @@ export function getLazyCalc(fundCode: string) {
   return client.get('/api/private/lazy_calc', { params: { fund_code: fundCode } })
 }
 
-/** 幽灵做市商下单 */
-export function postLazyPlaceOrder(mode: string, fundCode: string, params?: {
-  price?: number,
-  lof_price?: number,
-  quantity?: number,
-  etf_quantity?: number,
-  underlying_symbol?: string,
-}) {
-  return client.post('/api/private/lazy_place_order', { mode, fund_code: fundCode, ...params })
-}
-
 /** 幽灵做市商 - 诊断状态 */
 export function getLazyStatus() {
   return client.get('/api/private/lazy_status')

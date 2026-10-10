@@ -44,7 +44,7 @@ export interface FundItem {
  * [AI-2026-07-09] 分类已简化：数据库 category 值与主看板 TAB 名一一对应，无子分类映射。
  * 主看板 TAB 完全由数据库动态分类生成，不再需要 TAB→分类映射表。
  */
-export const HIGH_FREQ_TABS = ['自选', '黄金原油', 'QDII欧美', 'QDII日本', '白银']
+export const HIGH_FREQ_TABS = ['自选', '黄金原油', 'QDII欧美', 'QDII日本', '商品']
 
 export const useFundStore = defineStore('fund', () => {
   // ---- state ----
@@ -71,7 +71,7 @@ export const useFundStore = defineStore('fund', () => {
   const dbCategories = ref<string[]>([])
 
   // [AI-2026-07-09] 主看板 TAB 固定顺序（自选始终第一，其余按用户指定顺序，未知分类追加末尾）
-  const DASHBOARD_TAB_ORDER = ['黄金原油', 'QDII欧美', 'QDII日本', 'QDII亚洲', '国内LOF', '现金管理', '白银']
+  const DASHBOARD_TAB_ORDER = ['黄金原油', 'QDII欧美', 'QDII日本', 'QDII亚洲', '国内LOF', '现金管理', '商品']
 
   /** 主看板 TAB 列表：始终含"我的自选"，其余由数据库分类动态生成，按固定顺序排序 */
   const dashboardTabs = computed<string[]>(() => {
@@ -82,6 +82,10 @@ export const useFundStore = defineStore('fund', () => {
   })
   const fundHistory = ref<any[]>([])
   const fundHistoryLoading = ref(false)
+  // [AI-2026-10-09 方案A] 历史接口附带的锚点信号：today=服务器当天日期、
+  // trading_today=A股日历是否交易日（null=信号缺失/异常，前端锚点校验按无法判定保守处理）
+  const fundHistoryToday = ref<string | null>(null)
+  const fundHistoryTradingToday = ref<boolean | null>(null)
   const intradayData = ref<any[]>([])
   const basketData = ref<any[]>([])
 
@@ -224,10 +228,15 @@ export const useFundStore = defineStore('fund', () => {
       const res = await api.getFundHistory(code)
       if (res.data?.status === 'ok') {
         fundHistory.value = res.data.data || []
+        // [AI-2026-10-09 方案A] 存锚点信号（后端 today/trading_today）
+        fundHistoryToday.value = res.data.today ?? null
+        fundHistoryTradingToday.value = typeof res.data.trading_today === 'boolean' ? res.data.trading_today : null
       }
     } catch (err) {
       console.error('获取历史数据失败', err)
       fundHistory.value = []
+      fundHistoryToday.value = null
+      fundHistoryTradingToday.value = null
     } finally {
       fundHistoryLoading.value = false
     }
@@ -268,7 +277,7 @@ export const useFundStore = defineStore('fund', () => {
   return {
     tableData, loading, currentTab, searchKeyword,
     dashboardMeta,
-    fundHistory, fundHistoryLoading,
+    fundHistory, fundHistoryLoading, fundHistoryToday, fundHistoryTradingToday,
     intradayData, basketData,
     watchlist,
     filteredTableData, refreshInterval,

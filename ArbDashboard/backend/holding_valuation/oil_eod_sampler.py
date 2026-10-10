@@ -35,10 +35,31 @@ LOG_DIR = "/home/ubuntu/arbtest/logs"
 LOG_FILE = os.path.join(LOG_DIR, "oil_eod.log")
 SYMBOL = "OILUSA"
 SRC = "yahoo"
-# 凭据一律走环境变量，绝不硬编码（本文件会进公开仓库）
-# ARM 运行时由 systemd unit 的 Environment= 提供；缺失时静默跳过通知，不影响落库
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+# 凭据一律走 account_info/secrets.env（仓库外保险箱），绝不硬编码（本文件会进公开仓库）
+# 由 secrets.py 统一读取；缺失时静默跳过通知，不影响落库
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+def _load_secrets_module():
+    """从仓库外 account_info/secrets.py 加载统一凭据读取器（跨机：ARM/Local）。"""
+    for cand in (_Path("/home/ubuntu/account_info/secrets.py"),
+                 _Path(r"D:\Study\ARB\account_info\secrets.py")):
+        if cand.exists():
+            spec = _ilu.spec_from_file_location("_unified_secrets", str(cand))
+            m = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            return m
+    return None
+
+_SECRETS = _load_secrets_module()
+
+
+def get_secret(k, d=None):
+    return _SECRETS.get_secret(k, d) if _SECRETS is not None else d
+
+
+TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "")
 
 # ---------- 时区 ----------
 try:

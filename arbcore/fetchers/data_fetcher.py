@@ -880,9 +880,10 @@ class DataFetcher:
             logger.error(f"获取期货数据失败: {e}")
         
         # [AI-2026-07-02] 内盘期货 AG0 沪银（新浪 nf_ 格式）
+        # [AI-2026-10-09] 扩 M0 豆粕连续（大商所 M，159985 驱动）：AG0/M0 同 44 字段格式，同一入库逻辑复用
         try:
             _throttle_sina()
-            url_cn = "http://hq.sinajs.cn/list=nf_AG0"
+            url_cn = "http://hq.sinajs.cn/list=nf_AG0,nf_M0"
             response_cn = requests.get(url_cn, headers=headers, timeout=15, verify=False, proxies={"http": None, "https": None})
             response_cn.encoding = 'gbk'
             if response_cn.status_code == 200:
@@ -926,7 +927,7 @@ class DataFetcher:
                                 else:
                                     logger.warning(f"{symbol} 盘后 parts[9] 无官方结算价，按铁律不写入 futures_daily")
                             else:
-                                logger.info(f"{symbol} 盘中(<15:00)无当日官方结算价，本表不写 AG0（VWAP 走实时链路供主看板决策）")
+                                logger.info(f"{symbol} 盘中(<15:00)无当日官方结算价，本表不写该 symbol（VWAP 走实时链路供主看板决策）")
                     except Exception as e:
                         logger.error(f"解析内盘期货行失败 {line}: {e}")
         except Exception as e:

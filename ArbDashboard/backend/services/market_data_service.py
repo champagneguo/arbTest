@@ -9,7 +9,7 @@ from arbcore.fetchers.historical import HistoricalDataManager
 from arbcore.fetchers.ib_reader import IBReader
 from arbcore.fetchers.futu_reader import FutuReader
 from arbcore.fetchers.data_fetcher import DataFetcher
-from arbcore.utils.market_calendar import is_quote_window  # [AI-2026-08-07] 美股/港股盘口展示窗口 8:30-16:00（原 9:30）
+# [AI-2026-10-09] 删除 is_quote_window 时间门禁 import：行情展示改数据驱动（有真实盘口→显示，无推送/无数据→等待数据）
 
 logger = logging.getLogger(__name__)
 
@@ -344,10 +344,9 @@ class MarketDataService:
         
         # [FIX] 根据 source 决定是否走美股通道
         if source == 'IB':
-            # [AI-2026-08-07] 美股/港股盘口展示窗口（东哥修改）：8:30-16:00 显示，16:00 后一律不显示。
-            # 与富途门禁(is_quote_window)一致；不影响 Lazy_trader 夜盘下单（其直连 ib_reader，不经此路径）。
-            if not is_quote_window():
-                return None
+            # [AI-2026-10-09 东哥拍板] 取消 is_quote_window 时间门禁：程序估值与时间无关，行情展示数据驱动。
+            # IB 分支已有 `bid>0 且 bid!=ask` 真实盘口门槛（无推送自然落到富途兜底/等待数据），无需时间判断。
+            # 不影响 Lazy_trader 夜盘下单（其直连 ib_reader，不经此路径）。
             # 判断当前是否为 IB 夜盘时段（IB 仅在夜盘有免费实时数据）
             is_ib_night = False
             if self.ib_reader and hasattr(self.ib_reader, 'is_us_night_session'):
@@ -560,8 +559,8 @@ class MarketDataService:
                 break
 
         # [AI-2026-08-07] 原整体窗口门禁（8:30-16:00）删除：
-        # [AI-2026-08-19] IB 未购买行情、仅 OVERNIGHT(8:30-16:00) 免费 → IB 分支仍按 is_quote_window 判断；
-        # 富途促销期全时段免费实时行情 → 富途分支全时段取数。删除整体门禁，IB 分支自然降级（有则有、无则无）。
+        # [AI-2026-10-09 东哥拍板] is_quote_window 全面取消（含原 IB 分支残留判断）：行情展示纯数据驱动——
+        # 有真实盘口推送则显示，无推送/无数据则前端"等待数据"，不再用时间窗口拦截。
 
         # IB 原始盘口（仅夜盘有免费实时；其余时段 prices 可能为空/滞后，原样返回供对比）
         ib_q = None

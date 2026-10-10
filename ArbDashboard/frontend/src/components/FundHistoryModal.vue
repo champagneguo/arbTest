@@ -118,7 +118,7 @@ const emit = defineEmits<{
 
 const fundStore = useFundStore()
 const message = useMessage()
-const { fundHistory, tableData } = storeToRefs(fundStore)
+const { fundHistory, fundHistoryToday, fundHistoryTradingToday, tableData } = storeToRefs(fundStore)
 
 // [AI-2026-08-03] 「现价」优先显示盘中 LOF 实时价(realtime_price)，非交易时段回退收盘价。
 const curPrice = (row: any): number => {
@@ -276,13 +276,30 @@ const dayHoldColumns = computed<DataTableColumns<any>>(() => [
 // 盘中活日：最新已公布净值=nav(T-2)、最新预测=static_val(T-1) → 自动显示 T-2净值/T-1估值（与主看板口径一致）；
 // 净值公布后/节假日冻结：净值前移一行 → 自动变 T-1净值/T日估值，不再错位。fundHistory 为降序（[0]=T 日）。
 const _US_T = ['黄金原油', 'QDII欧美']
-const _ASIA_T = ['QDII日本', 'QDII亚洲', '国内LOF', '白银']
+const _ASIA_T = ['QDII日本', 'QDII亚洲', '国内LOF', '商品', '白银']
 const _offTxt = (i: number) => (i <= 0 ? 'T日' : `T-${i}`)
+// [AI-2026-10-09 方案A·东哥拍板] 锚点校验：所有 T-x 前缀都假设 rows[0]=当日(T)行。
+// 后端 /api/fund/{code}/history 已附带 today/trading_today（A股日历 market_calendar.is_trading_day 判定，
+// 东哥："程序能判断交易日，直接那里用"）：今天是交易日但 rows[0].date < today ⇒ 当日行缺失、
+// 下标全体左移 ⇒ anchorOk=false，T-x 前缀降级为该行真实日期(MM-DD)——不冒充 T-x、也不隐藏数据。
+// 今天非交易日（周末/假期）⇒ rows[0]=上一交易日即最新交易日，T 语义成立，保留 T-x。
+const anchorOk = computed(() => {
+  const rows = fundHistory.value || []
+  if (!rows.length || !rows[0]?.date) return true
+  if (fundHistoryTradingToday.value !== true) return true // 非交易日 / 信号缺失：保持原 T-x 行为
+  return String(rows[0].date) >= String(fundHistoryToday.value || '')
+})
+// T-x 前缀：锚点成立用相对偏移（T日/T-1/T-2）；断锚降级为该行真实日期(MM-DD)
+const _pref = (i: number) => {
+  if (anchorOk.value) return _offTxt(i)
+  const r = (fundHistory.value || [])[i]
+  return r?.date ? String(r.date).slice(5) : ''
+}
 const navRowIdx = computed(() => (fundHistory.value || []).findIndex(r => r.nav != null && r.nav > 0))
 const valRowIdx = computed(() => (fundHistory.value || []).findIndex(r => r.static_val != null && r.static_val > 0))
 const navLabel = computed(() => {
   const i = navRowIdx.value
-  if (i >= 0) return `${_offTxt(i)}净值`
+  if (i >= 0) return `${_pref(i)}净值`
   const c = fundRow.value?.category
   if (_US_T.includes(c)) return 'T-2净值'
   if (_ASIA_T.includes(c)) return 'T-1净值'
@@ -290,7 +307,7 @@ const navLabel = computed(() => {
 })
 const valLabel = computed(() => {
   const i = valRowIdx.value
-  if (i >= 0) return `${_offTxt(i)}估值`
+  if (i >= 0) return `${_pref(i)}估值`
   const c = fundRow.value?.category
   if (_US_T.includes(c)) return 'T-1估值'
   if (_ASIA_T.includes(c)) return 'T日估值'
@@ -299,23 +316,22 @@ const valLabel = computed(() => {
 // 溢价的分母=上面显示的那条估值，标签随 valLabel 同步
 const premLabel = computed(() => {
   const i = valRowIdx.value
-  if (i >= 0) return `${_offTxt(i)}溢价`
+  if (i >= 0) return `${_pref(i)}溢价`
   return 'T-1溢价'
 })
-// [AI-2026-10-07] 估值基准日 = 静态估值公式所用基准净值日期（≠T，T是实盘交易日）
-// 黄金原油/QDII欧美 滞后2日→基准=T-2；其余滞后1日→基准=T-1。日期取 fundHistory 对应偏移行。
-const baseOffset = computed(() => {
-  const c = fundRow.value?.category
-  if (_US_T.includes(c)) return 2
-  if (_ASIA_T.includes(c)) return 1
-  return 1
-})
+// [AI-2026-10-09 方案A·东哥拍板] 估值基准日 = 静态估值公式所用基准净值日期（step10/step11 的 prev_nav：
+// 严格早于 rows[0] 的首个有净值行），弃用固定 off(黄金原油/QDII欧美恒=2、其余恒=1)：
+// - 欧美盘中基准=T-2、晚间 nav(T-1) 公布后前移 T-1 —— 与 navLabel 同步前移，不再"净值已前移、基准还停 T-2"打架；
+// - 亚洲 rows[0] 有 nav 时 navRowIdx=0，但 static_val(T) 的基准仍是 rows[1]，故取 ≥1 首个有净值行
+//   （rows[0] 无 nav 的状态与 navRowIdx 完全等价）。
+// 锚点断时去 T-x 前缀、只显真实日期；无基准行返回空串（模板 v-if 隐藏，不冒充）。
+const baseRowIdx = computed(() => (fundHistory.value || []).findIndex((r, i) => i >= 1 && r.nav != null && r.nav > 0))
 const baseDateLabel = computed(() => {
-  const off = baseOffset.value
   const rows = fundHistory.value || []
-  const r = rows[off] || rows[rows.length - 1]
-  const d = r?.date ? String(r.date).slice(5) : ''
-  return `T-${off} = ${d}`
+  const i = baseRowIdx.value
+  if (i < 0 || !rows[i]?.date) return ''
+  const d = String(rows[i].date).slice(5)
+  return anchorOk.value ? `${_offTxt(i)} = ${d}` : d
 })
 const fxCcy = computed<string>(() => {
   const rows = fundHistory.value || []
@@ -327,7 +343,11 @@ const fxRows = computed<any[]>(() => {
   if (isCashManagementFund.value) return []
   const rows = fundHistory.value || []
   if (!rows.length) return []
-  const tags = ['T-2', 'T-1', 'T']
+  // [AI-2026-10-09 方案A·东哥拍板] 标签跟锚点走：断锚(当日行缺失、下标左移)时 T-2/T-1/T 前缀
+  // 会冒充错误相对日 ⇒ 降级为该行真实日期(MM-DD)；锚点成立保留原 T-x（与 navLabel/valLabel 同口径）。
+  const tags = anchorOk.value
+    ? ['T-2', 'T-1', 'T']
+    : [2, 1, 0].map(idx => (rows[idx]?.date ? String(rows[idx].date).slice(5) : ''))
   const ccy = fxCcy.value
   return [2, 1, 0].map((idx, i) => {
     const r = rows[idx]

@@ -383,15 +383,22 @@
       "db_categories": ["指数LOF", "其他", "国内LOF"],
       "funds": []
     },
-    "白银": {
-      "description": "跟踪白银期货的LOF基金",
-      "db_categories": ["白银", "白银LOF"],
+    "商品": {
+      "description": "跟踪境内商品期货（白银/豆粕）的LOF/ETF基金",
+      "db_categories": ["商品", "商品期货", "白银", "白银LOF"],
       "funds": [
         {
           "code": "161226",
           "name": "国瑞白银期货",
-          "category": "白银",
+          "category": "商品",
           "trade_future": "沪银Ag",
+          "position": 100.0
+        },
+        {
+          "code": "159985",
+          "name": "豆粕ETF华夏",
+          "category": "商品",
+          "trade_future": "豆粕M",
           "position": 100.0
         }
       ]
@@ -402,7 +409,7 @@
     "QDII欧美": "QDII欧美",
     "QDII亚洲": "QDII亚洲",
     "国内LOF": "国内LOF",
-    "白银": "白银"
+    "商品": "商品"
   },
   "usage_notes": {
     "program1": "程序1(LOFarb)可直接读取此文件替换lof_config.yaml中的funds部分",

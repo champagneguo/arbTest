@@ -359,8 +359,10 @@ class FutuReader:
 
         # [AI-2026-08-04] 原美股/港股盘口展示窗口门禁（8:30-16:00）仅服务 IB（未购买行情）。
         # [AI-2026-08-19] 东哥确认：富途促销期全时段免费实时行情（含盘前/夜盘/现在），
-        # 故富途不再受 is_quote_window 限制，全时段可取。IB 路径未动（仍走 is_quote_window）。
-        # 窗口外不建连/不订阅/不请求 OpenD 的逻辑对富途不适用——OpenD 全时段有真实行情。
+        # 故富途不再受 is_quote_window 限制，全时段可取。
+        # [AI-2026-10-09] 东哥拍板：is_quote_window 时间门禁整体取消（行情展示走数据驱动：
+        # 有真实盘口→显示，无数据→"等待数据"）。IB 路径的门禁已一并移除，
+        # is_quote_window 现仅剩 ledger_service（账本浮动跟盘）一处在用——勿在此处重新加回门禁。
         self.session_closed = False
 
         with self._lock:  # [V10.13] 多线程并发保护

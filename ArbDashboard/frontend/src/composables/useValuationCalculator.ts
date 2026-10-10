@@ -62,7 +62,7 @@ export function useValuationCalculator() {
   const isComplexCategory = computed(() => {
     if (isCashManagement.value) return false
     const cat = meta.value?.fund_config?.category || ''
-    const simpleCategories = ['QDII 亚洲', 'QDII亚洲', '国内LOF', '指数LOF', '白银', '其他']
+    const simpleCategories = ['QDII 亚洲', 'QDII亚洲', '国内LOF', '指数LOF', '商品', '白银', '其他']
     return !simpleCategories.includes(cat)
   })
 

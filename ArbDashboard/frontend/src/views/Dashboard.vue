@@ -643,8 +643,8 @@ const historyColumns = computed<DataTableColumns<any>>(() => {
 
     // [AI-2026-07-04] 判断是否有 hedge 数据（单ETF基金使用魔法公式需要）
     const hasHedge = fundHistory.value.some(r => r.hedge != null && r.hedge > 0)
-    // [AI-2026-08-21] 白银基金：历史弹窗"对冲值"列改为"结算价"（ag0_settle 由后端注入）
-    const isSilver = selectedFund.value?.category === '白银'
+    // [AI-2026-08-21] 商品基金（白银/豆粕）：历史弹窗"对冲值"列改为"结算价"（ag0/m0_settle 由后端注入）
+    const isSilver = selectedFund.value?.category === '商品'
 
     const baseCols: DataTableColumns<any> = [
         { title: '日期', key: 'date', width: 85, align: 'center', render(row: any) {
@@ -697,8 +697,8 @@ const historyColumns = computed<DataTableColumns<any>>(() => {
                 { title: '估值误差', key: 'val_error_pct', width: 85, align: 'center', render(row: any) { if (row.static_val == null || row.nav == null) return h('span', { class: 'num-cell muted' }, '-'); const v = row.static_val - row.nav; return h('span', { style: { color: priceColor(v), fontWeight: 'bold' } }, v.toFixed(4)) } },
                 { title: '误差率', key: 'val_error_rate', width: 78, align: 'center', render(row: any) { if (row.static_val == null || row.nav == null || row.nav === 0) return '-'; const v = (row.static_val - row.nav) / row.nav * 100; return h('span', { style: { color: priceColor(v), fontWeight: '500' } }, v.toFixed(3) + '%') } },
                 { title: '溢价', key: 'static_premium', width: 85, align: 'center', render(row: any) { const v = row.static_premium; if (v == null) return '-'; return h('span', { style: { color: priceColor(v) } }, formatPremium(v)) } },
-                // [AI-2026-08-21] 白银：历史弹窗"对冲值"列改为"结算价"（仅白银显示，数据来自后端 ag0_settle）
-                ...(isSilver ? [{ title: '结算价', key: 'ag0_settle', width: 95, align: 'center', render(row: any) { return row.ag0_settle != null ? renderValWithChg(row.ag0_settle, row.ag0_settle_chg, 2) : '-' } }] : []),
+                // [AI-2026-08-21] 商品（白银/豆粕）：历史弹窗"对冲值"列改为"结算价"（数据来自后端 ag0/m0_settle）
+                ...(isSilver ? [{ title: '结算价', key: 'ag0_settle', width: 95, align: 'center', render(row: any) { const v = row.ag0_settle != null ? row.ag0_settle : row.m0_settle; const chg = row.ag0_settle != null ? row.ag0_settle_chg : row.m0_settle_chg; return v != null ? renderValWithChg(v, chg, 2) : '-' } }] : []),
               ],
         // QDII亚洲 / QDII日本 / 国内LOF / 指数型基金 专属：指数价 + 指数涨跌
         ...(['QDII亚洲', 'QDII日本', '国内LOF'].includes(selectedFund.value?.category || '') || selectedFund.value?.sub_category?.includes('指数') ? [
@@ -792,7 +792,7 @@ const columns = computed<DataTableColumns<any>>(() => {
   let cols = allColumns.map(c => ({...c}))
 
   // 1. 动态重命名净值日期列
-  const t1Tabs = ['QDII亚洲', '国内LOF', '白银']
+  const t1Tabs = ['QDII亚洲', '国内LOF', '商品']
   const t2Tabs = ['QDII欧美', 'QDII日本', '黄金原油']  // [AI-2026-07-09] 混合跨境已并入QDII欧美；QDII日本同属T-2
   const navCol = cols.find(c => c.key === 'nav')
   if (navCol) {
@@ -801,8 +801,8 @@ const columns = computed<DataTableColumns<any>>(() => {
     else navCol.title = 'T-2/1日净值'
   }
 
-  // [V7.0] 白银 TAB 专属列与重命名
-  if (currentTab.value === '白银') {
+  // [V7.0] 商品 TAB 专属列与重命名（161226 白银 AG0/SI + 159985 豆粕 M0）
+  if (currentTab.value === '商品') {
     cols.forEach(col => {
       if (col.key === 'rt_val_display') col.title = '参考估值'
       if (col.key === 'rt_premium') col.title = '参考溢价'
@@ -812,8 +812,8 @@ const columns = computed<DataTableColumns<any>>(() => {
     
     const staticPremIndex = cols.findIndex(c => c.key === 'static_premium')
     cols.splice(staticPremIndex + 1, 0, 
-      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时成交价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0)')]), key: 'ag0_price', width: 100, align: 'center', render(row: any) { return h('span', { class: 'num-cell' }, row.ag0_price ? row.ag0_price.toFixed(0) : '-') } },
-      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '昨结算价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0)')]), key: 'ag0_settlement', width: 100, align: 'center', render(row: any) { return h('span', { class: 'num-cell muted' }, row.ag0_settlement ? row.ag0_settlement.toFixed(0) : '-') } },
+      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时成交价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0/M0)')]), key: 'futures_price', width: 100, align: 'center', render(row: any) { const v = row.ag0_price != null ? row.ag0_price : row.m0_price; return h('span', { class: 'num-cell' }, v != null ? Number(v).toFixed(0) : '-') } },
+      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '昨结算价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0/M0)')]), key: 'futures_settle', width: 100, align: 'center', render(row: any) { const v = row.ag0_settlement != null ? row.ag0_settlement : row.m0_settlement; return h('span', { class: 'num-cell muted' }, v != null ? Number(v).toFixed(0) : '-') } },
       // [AI-2026-10-09 东哥拍板] 白银比价弹窗记录为待修项。
       //   本列是**列级独立交互**，整行点击上线后必须 stopPropagation，
       //   否则点它会同时弹「白银比价」+「基金详情」两个窗（叠在一起）。
@@ -822,7 +822,7 @@ const columns = computed<DataTableColumns<any>>(() => {
     )
   }
 
-  const hideIndexTabs = ['黄金原油', 'QDII欧美', '白银']
+  const hideIndexTabs = ['黄金原油', 'QDII欧美', '商品']
   if (hideIndexTabs.includes(currentTab.value)) {
     return cols.filter(c => c.key !== 'related_index' && c.key !== 'index_close' && c.key !== 'index_pct' && c.key !== 'index_name')
   }

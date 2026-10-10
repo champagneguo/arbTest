@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # 【AI-2026-07-20 原】分类优先级管理：改为从 app_settings 读取暂停列表
 # HIGH_FREQ_CATEGORIES 是系统支持的全部分类（每分类独立 3s 快照循环）
 # [AI-2026-09-23] 分类级暂停功能已完整删除（见 docs/013_7），此处仅保留 ALL_CATEGORIES 供快照循环遍历
-ALL_CATEGORIES = ["黄金原油", "QDII欧美", "QDII日本", "白银", "QDII亚洲", "国内LOF", "现金管理"]
+ALL_CATEGORIES = ["黄金原油", "QDII欧美", "QDII日本", "商品", "QDII亚洲", "国内LOF", "现金管理"]
 
 
 class DashboardSnapshotService:

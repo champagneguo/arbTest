@@ -235,14 +235,10 @@ const menuOptions = [
     label: () => h(RouterLink, { to: '/dashboard' }, { default: () => '套利看板' }),
     key: 'dashboard'
   },
-  {
-    label: () => h(RouterLink, { to: '/auto-trade' }, { default: () => '信号监视' }),
-    key: 'auto-trade'
-  },
-  {
-    label: () => h(RouterLink, { to: '/ledger' }, { default: () => '盘后对账' }),
-    key: 'ledger'
-  },
+  // [AI-2026-10-09 东哥拍板] 删除「信号监视(auto-trade)」「盘后对账(ledger)」两项侧边栏入口：
+  //   两者均为交易台能力（规则引擎 / 套利账本），按目标架构已归属 LOFTrader(:5174)，
+  //   不应出现在 LOFarb(数据/估值/看板)。路由与页面保留未删（后端端点仍供 LOFTrader 透传调用），
+  //   仅移除 LOFarb 侧边栏暴露的入口，求稳可逆。
   {
     label: () => h(RouterLink, { to: '/etf-rotation' }, { default: () => 'ETF轮动' }),
     key: 'etf-rotation'

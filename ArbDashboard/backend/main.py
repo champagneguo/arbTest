@@ -5,7 +5,7 @@ import asyncio
 
 # [AI-2026-08-03 / 2026-08-05] 强制唯一启动解释器：后端必须用项目虚拟环境 ArbDashboard/.venv 启动。
 # 机器上存在多个 Python（系统 Python311 / WorkBuddy 内置 3.13），其中只有 .venv 同时装有
-# ibapi + apscheduler + xtquant + akshare 等全部依赖。用错解释器会导致 IB 行情 / 冻结调度器
+# ibapi + apscheduler + xtquant + akshare 等全部依赖。用错解释器会导致 IB 行情 / 定时调度器
 # 静默失效（典型症状：No module named 'apscheduler'、IB 盘口全空）。
 # 早前做法是“缺依赖就 fatal 退出”，但误双击 main.py 仍可能用系统 Python 起第二个后端、或闪退。
 # 改为“非 .venv 解释器（系统 Python / WorkBuddy python / 误双击）在此无缝 re-exec 到 .venv”——
@@ -260,7 +260,8 @@ try:
     from services.config_service import ConfigService
     from services.market_data_service import MarketDataService
     from services.system_status_service import system_status
-    from services.intraday.sampler_service import IntradaySamplerService
+    # [AI-2026-10-09] 本地分时采样已移除以本地不再自己采（分时由 ARM 采集 → arm_sync_service 同步）
+    # 原 import services.intraday.sampler_service 已删（孤儿代码，东哥拍板「彻底删」）
     from services.dashboard_snapshot_service import DashboardSnapshotService
     # [AI-2026-10-08] TradingService 已剥离至 LOFTrader（交易内核不再由 LOFarb 持有）
     from services.config_manager_service import ConfigManagerService
@@ -340,8 +341,7 @@ _morning_refresh_time = None
 market_data_service = MarketDataService(db)
 fund_service = FundService(db, market_data_service=market_data_service, config_service=config_service)
 holding_service = HoldingService(db, market_data_service=market_data_service)
-sampler_service = IntradaySamplerService(db, market_data_service, config_service)
-sampler_service.active_watchlist = _active_watchlist
+# [AI-2026-10-09] 本地分时采样已移除（分时由 ARM 采集 → arm_sync_service 同步），不再实例化 sampler_service
 dashboard_snapshot_service = DashboardSnapshotService(
     fund_service,
     market_data_service=market_data_service,
@@ -472,12 +472,8 @@ async def lifespan(app: FastAPI):
         
         asyncio.create_task(run_011_first())
 
-        # 2. 启动分时采样服务
-        await sampler_service.start()
-        if sampler_service.running:
-            system_status.add_milestone("SUCCESS", "分时采样服务已启动")
-        else:
-            system_status.add_milestone("INFO", "分时采样服务未启动 (已配置禁用)")
+        # 2. 分时数据由 ARM 采集 → arm_sync_service 从 ARM 同步到本地（本地不自己采分时）
+        system_status.add_milestone("INFO", "分时数据依赖 ARM 采集同步 (本地不本地采样)")
 
         # 3. 启动实时行情引擎（延迟10秒，等 011 任务先跑起来）
         # 011 需要 1-2 分钟，通达信可以稍后启动
@@ -660,55 +656,20 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed during backend startup: {e}")
         system_status.add_milestone("ERROR", f"系统启动自检异常: {e}")
 
-    # 4.6 [2026-07-31] 实时估值冻结调度器：每日收盘后把当时 rt_val/rt_premium 快照到 database/rt_freeze.json
-    # 主看板收盘后直接显示冻结值 + 「15:00冻结」标签。依赖后端常驻，无需人工。
-    # [AI-2026-08-03] 弃用 apscheduler（后端启动解释器环境不一致时常缺失 → 冻结功能失效），
-    # 改用与「收盘后流水线」同构的 asyncio 循环，零外部依赖、任何 Python 均可运行。
-    try:
-        from services.realtime_freeze import snapshot_realtime_freeze, load_realtime_freeze
-        from datetime import datetime as _dt
-
-        async def _realtime_freeze_loop():
-            _fz_done = set()
-            while True:
-                await asyncio.sleep(60)
-                _n = _dt.now()
-                if _n.weekday() in (5, 6):
-                    _fz_done.clear()
-                    continue
-                _today = _n.strftime('%Y-%m-%d')
-                # 触发窗口：15:00 之后（含盘中才启动的补跑），每日仅一次
-                if _today not in _fz_done and (_n.hour > 15 or (_n.hour == 15 and _n.minute >= 1)):
-                    _fz_done.add(_today)
-                    try:
-                        await asyncio.to_thread(snapshot_realtime_freeze, fund_service)
-                        logger.info("[FREEZE] 实时估值已冻结快照 (15:00)")
-                    except Exception as _e:
-                        logger.error(f"[FREEZE] 快照失败: {_e}")
-
-        asyncio.create_task(_realtime_freeze_loop())
-        logger.info("[FREEZE] 实时估值冻结调度器已启动（每日 15:00 后快照，asyncio 零依赖）")
-        system_status.add_milestone("SUCCESS", "实时估值冻结调度器已启动")
-
-        # 启动备用源：若此刻已过 15:00 且今日尚未冻结（如后端盘中才启动），立即补快照一次
-        _now = _dt.now()
-        if _now.weekday() not in (5, 6) and _now.hour >= 15:
-            _fz = load_realtime_freeze()
-            if not _fz or _fz.get('date') != _now.strftime('%Y-%m-%d'):
-                await asyncio.to_thread(snapshot_realtime_freeze, fund_service)
-                logger.info("[FREEZE] 启动备用源：补拍今日冻结快照")
-
-    except Exception as e:
-        logger.error(f"[FREEZE] 调度器启动失败（冻结功能停用，其余正常）: {e}")
-        system_status.add_milestone("ERROR", f"冻结调度器启动失败: {e}")
+    # 4.6 [2026-10-09 东哥拍板 · 冻结机制已整体取消] 原「实时估值冻结调度器」（每日 15:00 后
+    # 把 rt_val/rt_premium 快照到 database/rt_freeze.json）整段删除：程序估值与时间无关，
+    # 行情展示走数据驱动（有真实盘口→显示，无数据→"等待数据"），禁止 15:00 快照覆盖 live 值。
+    # rt_freeze.json / rt_cache.json 停止写入（历史文件保留）；rt_frozen 字段恒不写入。
 
     # 4.7 [2026-08-20] 盘后收盘价兜底调度器：时间 ≥15:00 且今天 price 为 NULL 时，
     # 调 daily_updater 写今天官方收盘。解决主看板盘后显示"昨天收盘"的问题，无需等 15:35 流水线。
-    # [AI-2026-08-20] 修复：① 原插入位置破坏 4.6 冻结调度器的 try/except 结构（SyntaxError）；
+    # [AI-2026-08-20] 修复：① 原插入位置破坏旧 4.6 冻结调度器的 try/except 结构（SyntaxError）；
     # ② 原实现同步调 _DU()._step4_fetch_prices() 在 asyncio 事件循环内阻塞数分钟（腾讯K线
     # 每只 12s 超时 × 数十只），导致 uvicorn 全接口超时。改为 _popen_script_once 异步子进程
     # 启动 daily_updater --daily-close（与 15:35 流水线同款，不阻塞事件循环）。
+    # [AI-2026-10-09] _dt import 下移至此（原属 4.6 冻结块，冻结已取消但下方循环仍用 _dt.now()）。
     try:
+        from datetime import datetime as _dt
         # [AI-2026-10-03 东哥点名修复] 复用 A股交易日历（chinese_calendar + _HOLIDAYS_2026 兜底）。
         # 仅用于下方盘后兜底循环的「非交易日」门控；取不到时降级 None（退回仅周末过滤），
         # 绝不影响其他功能。与 daily_updater.py 同口径（arbcore.utils.market_calendar）。
@@ -721,15 +682,36 @@ async def lifespan(app: FastAPI):
         def _count_today_close_prices(_db, _date):
             """[AI-2026-09-02] 同步 DB 查询，只供 asyncio.to_thread 调用。
             绝不能在 asyncio 事件循环（MainThread）里直接连 SQLite —— 一旦等锁，
-            整个 uvicorn 全接口超时（loop-watchdog 抓到的 60s 卡死即由此而来）。"""
+            整个 uvicorn 全接口超时（loop-watchdog 抓到的 60s 卡死即由此而来）。
+
+            [AI-2026-10-09 方案B·东哥拍板] 返回 (covered, expected) 覆盖率判据：
+            - covered = unified_fund_list 中今日已写官方收盘价(price非空)的只数；
+            - expected = unified_fund_list 只数 − 其中「真·无日K线」跳过名单只数。
+            原判据「今日任意 price 非空行数 > 0 即完成」会被 159985/161226 期货镜像行
+            （盘后 16:36 落库）提前满足 → 其余 34 只缺价也永不重试（2026-10-09 事故根因之一）。
+            改按名单覆盖率判定：2 条镜像行凑不齐 36 只覆盖 ⇒ 照样触发补写；
+            真·无K线基金从 expected 中剔除，避免凑不齐导致盘后无限重拉。"""
             _conn = _db._get_conn()
             try:
-                return _conn.execute(
-                    "SELECT COUNT(*) FROM unified_fund_history WHERE date=? AND price IS NOT NULL",
-                    (_date,)
-                ).fetchone()[0]
+                _list_codes = {str(r[0]) for r in _conn.execute(
+                    "SELECT fund_code FROM unified_fund_list").fetchall() if r[0]}
+                _covered = _conn.execute(
+                    "SELECT COUNT(*) FROM unified_fund_history WHERE date=? AND price IS NOT NULL"
+                    " AND fund_code IN (SELECT fund_code FROM unified_fund_list)",
+                    (_date,)).fetchone()[0]
             finally:
                 _conn.close()
+            _denied = 0
+            try:
+                import json as _json
+                _dl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        '..', '..', 'arbcore', 'config', 'no_kline_funds.json')
+                if os.path.exists(_dl_path):
+                    with open(_dl_path, 'r', encoding='utf-8') as _f:
+                        _denied = len(set(_json.load(_f).keys()) & _list_codes)
+            except Exception:
+                _denied = 0  # 名单读不了按 0 算（等价于全量覆盖判定，宁可多重试也不误判完成）
+            return _covered, max(len(_list_codes) - _denied, 0)
 
         async def _after_hours_close_price_loop():
             """[AI-2026-08-20] 盘后收盘价兜底：15:00后每天自动写今天官方收盘。
@@ -749,13 +731,14 @@ async def lifespan(app: FastAPI):
                 _today = _n.strftime('%Y-%m-%d')
                 try:
                     # [AI-2026-09-02] DB 查询放线程，避免阻塞事件循环
-                    _count = await asyncio.to_thread(_count_today_close_prices, db, _today)
+                    # [AI-2026-10-09 方案B] 返回 (covered, expected) 覆盖率二元组
+                    _covered, _expected = await asyncio.to_thread(_count_today_close_prices, db, _today)
                 except Exception as _e:
                     logger.error(f"[AFTER_HOURS] DB检查失败: {_e}")
                     continue
-                if _count > 0:
-                    continue  # 已有今天收盘价，跳过
-                # 没有 → 异步子进程触发写入（不阻塞 uvicorn 事件循环）
+                if _expected > 0 and _covered >= _expected:
+                    continue  # 覆盖率已齐（余下均为真·无日K线），跳过
+                # 未齐（含镜像行冒充场景）→ 异步子进程触发写入（不阻塞 uvicorn 事件循环）
                 try:
                     # [AI-2026-09-24 修 bug] 原实现硬编码 Windows 路径 ".venv/Scripts/python.exe"，
                     # 在 ARM(Linux) 上每 30s 抛 FileNotFoundError → daily_updater --daily-close 从未跑起来
@@ -767,7 +750,7 @@ async def lifespan(app: FastAPI):
                         logger.warning(f"[AFTER_HOURS] 未找到 Python 或脚本，跳过本轮: pe={_pe} script={_du_py}")
                         continue
                     if _popen_script_once([_pe, _du_py, "--daily-close"], _sd, "daily_updater.py"):
-                        logger.info(f"[AFTER_HOURS] 盘后收盘价兜底已异步启动 daily_updater --daily-close ({_today})")
+                        logger.info(f"[AFTER_HOURS] 盘后收盘价兜底已异步启动 daily_updater --daily-close ({_today} 覆盖 {_covered}/{_expected})")
                     else:
                         logger.warning(f"[AFTER_HOURS] 盘后收盘价兜底启动被拒（可能已在运行）({_today})")
                 except Exception as _e:
@@ -791,10 +774,11 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # [AI-2026-08-03] 冻结调度器已改为 asyncio 任务（随进程退出自动回收），无需显式 shutdown
+    # [AI-2026-08-03] 各调度器已改为 asyncio 任务（随进程退出自动回收），无需显式 shutdown
+    # [AI-2026-10-09] 原冻结调度器已随冻结机制整体取消（见上方 4.6 注释）
     logger.info("🛠️ Shutting down ArbTest Backend...")
     await dashboard_snapshot_service.stop()
-    await sampler_service.stop()
+    # [AI-2026-10-09] 本地分时采样已移除，无 sampler_service 可 stop（分时由 ARM 采集 → arm_sync_service 同步）
     # [AI-2026-10-09] auto_trade_runner / signal_detector 两个恒 None 死变量已删（见上方 import 块注释）
     market_data_service.realtime_manager.stop()
     # [AI-2026-07-13] 先 stop_polling() 再 disconnect()，防止 polling 线程抢重连
@@ -1341,7 +1325,19 @@ async def get_maintenance_report():
 @app.get("/api/fund/{code}/history")
 async def get_fund_history(code: str):
     data = fund_service.get_fund_history(code)
-    return {"status": "ok", "data": data}
+    # [AI-2026-10-09 方案A·东哥拍板] 附带锚点信号：today=服务器当天日期、trading_today=A股日历判定
+    # （market_calendar.is_trading_day，与 daily_updater/盘后兜底同口径，可判任意日期、不依赖爬虫落库时点）。
+    # 前端据此校验 fundHistory rows[0] 是否为当日行：今天是交易日但缺行 ⇒ T-x 标签降级显真实日期、不冒充。
+    from datetime import date as _d
+    _today = _d.today()
+    try:
+        from arbcore.utils.market_calendar import is_trading_day as _is_cn_td
+        _trading = bool(_is_cn_td('A_SHARE', _today))
+    except Exception as _e:
+        logger.warning(f"[fund-history] 交易日判定失败，按交易日处理(锚点校验保守): {_e}")
+        _trading = True
+    return {"status": "ok", "data": data,
+            "today": _today.strftime('%Y-%m-%d'), "trading_today": _trading}
 
 # [AI-2026-08-04] 单基金「核对静态估值」：替代已移除的全局重算。补采该基金近 days 个交易日
 # 价格+净值（级联底层ETF日价），再重算 static_val。对应前端历史弹窗「核对静态估值」按钮。
@@ -2230,7 +2226,8 @@ def _resolve_hedge_for_order(fund_code, underlying_symbol):
         fx_df = pd.read_sql(
             # [AI-2026-10-07] 加 IS NOT NULL：节假日最新一行 mid 为 NULL，
             #   原写法 float(None) 抛 TypeError → 整函数失败 → 下单被误判为"hedge 不足"拒绝。
-            #   与 fund_service.get_valuation_meta / sampler_service 同口径：取最近一次已公布中间价。
+            #   与 fund_service.get_valuation_meta 同口径：取最近一次已公布中间价。
+            #   [AI-2026-10-09] 原参照 sampler_service 已随本地采样移除（分时归 ARM）。
             "SELECT usd_cny_mid FROM exchange_rate "
             "WHERE usd_cny_mid IS NOT NULL ORDER BY date DESC LIMIT 1", conn2
         )
@@ -3741,8 +3738,9 @@ def get_funds_realtime_est():
             "rt_premium": r.get("rt_premium"),
             "category": r.get("category"),
             "name": r.get("fund_name"),
-            # [AI-2026-08-04] 透传收盘冻结标记：get_unified_dashboard_data() 末尾 apply_freeze_to_dashboard()
-            # 已标 rt_frozen / rt_frozen_note；H5 卡片据此画「冻」徽章（与本机前端 Dashboard.vue 同源，逻辑只此一处）。
+            # [AI-2026-10-09] 冻结机制已取消（东哥拍板：程序估值与时间无关）：get_unified_dashboard_data()
+            # 不再调 apply_freeze_to_dashboard()，rt_frozen / rt_frozen_note 恒不写入 ⇒ 本透传恒 None。
+            # 字段保留仅为 H5 消费端兼容（Dashboard.vue / H5 卡片仍读该键，无值即不画「冻」徽章）。
             "rt_frozen": r.get("rt_frozen"),
             "rt_frozen_note": r.get("rt_frozen_note"),
         }

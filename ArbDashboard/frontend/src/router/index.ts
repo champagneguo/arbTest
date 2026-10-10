@@ -24,19 +24,26 @@ const router = createRouter({
           component: Dashboard
         },
         {
+          // 🔴 [AI-2026-10-09 东哥拍板] 「套利雷达/深度分析」整页（Analysis.vue，含实盘下单执行）
+          //    搬到 LOFTrader(:5174) 并独立建菜单。LOFarb 侧源文件删除，
+          //    与 auto-trade/ledger 同模式：保留占位兼容跳转，旧书签回主看板，不 404。
           path: 'analysis',
           name: 'Analysis',
-          component: () => import('../views/Analysis.vue')
+          redirect: '/dashboard'
         },
         {
+          // 🔴 [AI-2026-10-09 东哥拍板] 「信号监视」/「盘后对账」两页源文件
+          //    （AutoTrade.vue / Ledger.vue）已删，能力整体归 LOFTrader(:5174)。
+          //    与 lazymode 同模式：保留占位兼容跳转，旧书签/旧链接回主看板，不 404 白屏。
           path: 'auto-trade',
           name: 'AutoTrade',
-          component: () => import('../views/AutoTrade.vue')
+          redirect: '/dashboard'
         },
         {
+          // 同上：盘后对账 → 回主看板
           path: 'ledger',
           name: 'Ledger',
-          component: () => import('../views/Ledger.vue')
+          redirect: '/dashboard'
         },
         {
           path: 'data',

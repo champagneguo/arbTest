@@ -252,6 +252,10 @@ def is_a_share_session(now_dt: datetime = None) -> bool:
 # [AI-2026-08-07] 东哥修改：盘口展示窗口提前到 8:30（8:30=510），原 9:30=570
 # [AI-2026-08-19] 注意：此窗口仅服务 IB（未购买行情，仅 OVERNIGHT 8:30-16:00 免费）。
 #   富途促销期全时段免费，其门禁在 futu_reader.get_prices / get_dual_quote 中单独放开（不依赖本函数）。
+# [AI-2026-10-09 东哥拍板] 时间门禁整体取消：行情展示走数据驱动（有真实盘口→显示，
+#   无数据→"等待数据"），market_data_service / futu_reader 的 is_quote_window 调用已删除。
+#   本函数保留且行为不变，唯一消费方 = ledger_service.py（账本浮动跟盘）——
+#   属独立关注点（账本跟 A 股盘走），勿因"门禁已取消"误删本函数。
 def is_quote_window(now_dt: datetime = None) -> bool:
     """判断当前是否处于美股/港股盘口展示时段（北京时间 8:30-16:00，含午休，周一~周五）。"""
     if now_dt is None:
@@ -295,6 +299,36 @@ def is_shfe_open(now_dt: datetime = None) -> bool:
     if time(10, 30) <= t < time(11, 30):
         return True
     # 下午盘
+    if time(13, 30) <= t < time(15, 0):
+        return True
+    return False
+
+def is_dce_open(now_dt: datetime = None) -> bool:
+    """
+    [AI-2026-10-09] 判断大连商品交易所(DCE)当前是否处于连续交易时段。
+    用于 159985 豆粕ETF（驱动=大商所豆粕期货 M，新浪 nf_M0）实时估值守卫。
+
+    大商所交易时段（北京时间，与上期所 SHFE 一致）：
+      - 夜盘 21:00 ~ 次日 02:30（跨零点，归属前一交易日）
+      - 上午 09:00 ~ 10:15
+      - 上午 10:30 ~ 11:30
+      - 下午 13:30 ~ 15:00
+    DCE 仅在 A 股交易日开市（与 A 股同休假日历）。
+    """
+    if now_dt is None:
+        now_dt = datetime.now()
+    t = now_dt.time()
+    session_date = now_dt.date()
+    if t < time(2, 30):
+        session_date = session_date - timedelta(days=1)
+    if not is_trading_day('A_SHARE', session_date):
+        return False
+    if t >= time(21, 0) or t < time(2, 30):
+        return True
+    if time(9, 0) <= t < time(10, 15):
+        return True
+    if time(10, 30) <= t < time(11, 30):
+        return True
     if time(13, 30) <= t < time(15, 0):
         return True
     return False

@@ -928,9 +928,18 @@ class DailyUpdater(BaseApp):
                 items = _fetch_sina_kline(tx_code)
                 qt_close = None
                 if items is None:
-                    k_status = 'no_data'
+                    # [AI-2026-10-09 方案B·东哥拍板] 双源**瞬态**失败（腾讯WAF/超时 + 新浪对
+                    # LOF 恒返回 null/异常）绝不能当"该基金无K线"写入**永久**跳过名单。
+                    # 2026-10-09 实盘事故：一次性毒化 unified_fund_list 全部 36 只（含 162411）
+                    # → 收盘价永久写不进、盘后兜底空转、269 只缺当日行；毒名单还被提交进 git
+                    # （3387f2c 09:20）。修复：瞬态失败只跳过本轮、下轮重试；只有腾讯**结构上
+                    # 确实无 kline 节点**（下方 no_data 分支）才允许进跳过名单。
+                    self.logger.warning(f"⚠️ [{code}] 腾讯/新浪双源瞬态失败，跳过本轮（不入跳过名单，下轮重试）")
+                    continue
             if k_status == 'no_data':
                 # [AI-2026-08-03] 首次探测到无K线：写入跳过名单，避免后续每次启动刷 WARNING
+                # [AI-2026-10-09 方案B] 仅腾讯成功解析但无 kline 节点才走到这里（真·无日K线基金）；
+                # 瞬态失败已在上方 continue，不再污染本名单。
                 if code not in no_kline:
                     no_kline[code] = "腾讯/新浪均无日K线(债券/封闭LOF)"
                     _save_no_kline_denylist(no_kline)
@@ -2140,18 +2149,28 @@ class DailyUpdater(BaseApp):
             conn.close()
             return
 
-        # 3. 逐日计算：prev_row 的 NAV 作 NAV(D-1)，prev_row 日期作 D-1 取 settle
+        # 3. 逐日计算：prev_nav 作 NAV(D-1)，分母取「最近一个 ≤D 且有 AG0 结算价」的交易日
+        # [AI-2026-10-09 修复] 旧写法用 NAV 序列相邻行做 D-1，国庆休市(10-07)时 10-08 的
+        #   prev_date=09-30 虽能命中 ag0_settle，但中间跨了休市；且历史陈旧值(如 1.6456)未覆盖。
+        #   现改为：分母 sp = ag0_settle 中「严格小于 date 的最大日期」的结算价（最近有 AG0 的交易日），
+        #   分子 sd = ag0_settle[date]。跨休市/长假都能取到正确分母（10-08 的分母=09-30=14928）。
+        #   无 AG0 的 D（date not in ag0_settle）跳过；D 之前无任何 AG0 结算价也跳过。
+        ag0_sorted_dates = sorted(ag0_settle.keys())
         updates = []
         prev_nav = None
         prev_date = None
         today_str = datetime.now().strftime('%Y-%m-%d')
         for date, nav in nav_rows:
             # [AI-2026-08-21] 今天这一行不写历史估值：盘中未收盘、AG0 结算价为昨结算，写进历史表会误导
-            if date != today_str and (prev_nav is not None and prev_nav > 0
-                    and date in ag0_settle and prev_date in ag0_settle):
+            if date != today_str and prev_nav is not None and prev_nav > 0 and date in ag0_settle:
                 sd = ag0_settle[date]
-                sp = ag0_settle[prev_date]
-                if sd > 0 and sp > 0:
+                # 分母：最近一个严格小于 date 且有 AG0 结算价的交易日
+                sp = None
+                for d in reversed(ag0_sorted_dates):
+                    if d < date:
+                        sp = ag0_settle[d]
+                        break
+                if sp is not None and sd > 0 and sp > 0:
                     updates.append((round(prev_nav * sd / sp, 4), date))
             prev_nav = nav if nav is not None else prev_nav
             prev_date = date

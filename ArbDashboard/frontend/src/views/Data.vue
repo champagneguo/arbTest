@@ -447,7 +447,7 @@ const getCategoryBadgeStyle = (cat: string) => {
     else if (cat.includes('原油')) { textColor = '#475569'; bgColor = '#f1f5f9'; }
     else if (cat.includes('指数')) { textColor = '#2563eb'; bgColor = '#dbeafe'; }
     else if (cat.includes('跨境') || cat.includes('欧美') || cat.includes('亚洲') || cat.includes('纯ETF') || cat.includes('混合')) { textColor = '#dc2626'; bgColor = '#fee2e2'; }
-    else if (cat.includes('白银')) { textColor = '#059669'; bgColor = '#d1fae5'; }
+    else if (cat.includes('白银') || cat.includes('商品') || cat.includes('豆粕')) { textColor = '#059669'; bgColor = '#d1fae5'; }
     return { color: textColor, backgroundColor: bgColor, padding: '3px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: 'bold', display: 'inline-block', lineHeight: '1.2' };
 }
 
@@ -458,6 +458,7 @@ const CATEGORY_TEXT_COLOR: Record<string, string> = {
   'QDII日本': '#db2777',   // 粉
   'QDII亚洲': '#7c3aed',   // 紫
   '国内LOF': '#2563eb',    // 蓝
+  '商品': '#059669',       // 绿（白银/豆粕，10-09 白银 TAB 改名商品）
   '白银': '#059669',       // 绿
   '现金管理': '#64748b',   // 灰
 }
@@ -759,14 +760,15 @@ function invHedgeFallback(cat: string): string {
     case 'QDII日本': return '日经期货NK: 新浪 hf_NK(无兜底)'
     case 'QDII亚洲':
     case '国内LOF': return '无法对冲'
-    case '白银': return '沪银Ag: 上期所/新浪(无兜底)'
+    case '白银':
+    case '商品': return '沪银Ag/豆粕M: 上期所/大商所·新浪 nf_(无兜底)'
     case '现金管理': return '未配置'
     default: return '待确认'
   }
 }
 
 const inventoryRows = computed(() => {
-  const catOrder = ['黄金原油', 'QDII欧美', 'QDII日本', 'QDII亚洲', '国内LOF', '白银', '现金管理']
+  const catOrder = ['黄金原油', 'QDII欧美', 'QDII日本', 'QDII亚洲', '国内LOF', '商品', '白银', '现金管理']
   const rows = (fundConfigs.value || []).map((fd: any) => {
     const cat = fd.category || ''
     const sa = invStaticAlgo(fd)
