@@ -3,7 +3,6 @@ from typing import List, Dict, Optional, Any
 import pandas as pd
 from .eastmoney import EastMoneyHistoricalFetcher
 from .sina import SinaHistoricalFetcher
-from .xueqiu import XueqiuHistoricalFetcher
 from .tencent import TencentHistoricalFetcher
 from arbcore.config.source_routing import get_symbol_source
 
@@ -19,7 +18,6 @@ class HistoricalDataManager:
         self.fetchers = {
             "eastmoney": EastMoneyHistoricalFetcher(),
             "sina": SinaHistoricalFetcher(),
-            "xueqiu": XueqiuHistoricalFetcher(),
             "tencent": TencentHistoricalFetcher(),
             "east_money": EastMoneyHistoricalFetcher(), # 别名
             "sina_finance": SinaHistoricalFetcher()     # 别名
