@@ -150,8 +150,9 @@ def reconcile_fund_static_val(fund_code: str, days: int = 10) -> dict:
                         denom = float(t1[0])
             if denom and denom > 0:
                 prem = (price - denom) / denom * 100
+                # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 premium 是谁写的"
                 conn.execute(
-                    "UPDATE unified_fund_history SET premium=? WHERE date=? AND fund_code=?",
+                    "UPDATE unified_fund_history SET premium=?, writer='lofarb:fund_reconcile' WHERE date=? AND fund_code=?",
                     (round(prem, 4), ds, fund_code))
                 stats["premium_updated"] += 1
         conn.commit()

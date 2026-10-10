@@ -1057,8 +1057,9 @@ class HoldingService:
         # （完整历史由每日 08:05 `_step_oil_recalc`(start=2026-01-01) 负责全量重写。）
         conn = self._get_conn()
         try:
+            # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 holding_static_val 清零是谁做的"
             conn.execute(
-                "UPDATE unified_fund_history SET holding_static_val=NULL "
+                "UPDATE unified_fund_history SET holding_static_val=NULL, writer='lofarb:holding_service.recalc_clear' "
                 "WHERE fund_code=? AND date>=?",
                 (fund_code, start),
             )
@@ -1067,10 +1068,11 @@ class HoldingService:
                     # [AI-2026-09-26] upsert：净值源表无该日期行时插行（仅写 fund_code/date/
                     # holding_static_val，其余列留 NULL 由净值链路后续 upsert 填充）。
                     # 净值链路 save_unified_history 同为 ON CONFLICT upsert，互不覆盖。
+                    # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 holding_static_val 是谁写的"
                     conn.execute(
-                        "INSERT INTO unified_fund_history (date, fund_code, holding_static_val) "
-                        "VALUES (?, ?, ?) ON CONFLICT(date, fund_code) DO UPDATE "
-                        "SET holding_static_val=excluded.holding_static_val",
+                        "INSERT INTO unified_fund_history (date, fund_code, holding_static_val, writer) "
+                        "VALUES (?, ?, ?, 'lofarb:holding_service.recalc') ON CONFLICT(date, fund_code) DO UPDATE "
+                        "SET holding_static_val=excluded.holding_static_val, writer=excluded.writer",
                         (r["date"], fund_code, r["holding_static_val"]),
                     )
             conn.commit()
@@ -2393,10 +2395,11 @@ print(json.dumps({'updated': len(rows), 'total': tot[0], 'max_date': tot[1]}))
                 for fc, d, v in rows:
                     # [AI-2026-09-26] UPDATE-only 改 upsert：本地无该日行（如 9-25 新估值日，
                     # 本地从未生成占位行）时 UPDATE 匹配 0 行导致拉回丢失；upsert 直接补行。
+                    # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 holding_static_val 是谁写的"（ARM拉回）
                     cur = conn.execute(
-                        "INSERT INTO unified_fund_history (date, fund_code, holding_static_val) "
-                        "VALUES (?, ?, ?) ON CONFLICT(date, fund_code) "
-                        "DO UPDATE SET holding_static_val=excluded.holding_static_val",
+                        "INSERT INTO unified_fund_history (date, fund_code, holding_static_val, writer) "
+                        "VALUES (?, ?, ?, 'lofarb:holding_service.pull_from_arm') ON CONFLICT(date, fund_code) "
+                        "DO UPDATE SET holding_static_val=excluded.holding_static_val, writer=excluded.writer",
                         (d, fc, v))
                     n += cur.rowcount if cur.rowcount > 0 else 0
                 conn.commit()

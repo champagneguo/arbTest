@@ -197,12 +197,16 @@ class FundManager(BaseManager):
         """
         [V3.0] 极简通用型历史数据保存器
         支持动态列更新，自动处理 NULL 覆盖问题。
+        [AI-2026-10-09] 打 writer 标识（默认 'lofarb:fund_manager'），供事后追查"这行是谁写的"
+        （凌晨批来源排查教训）。调用方可用 kwargs['writer'] 覆盖为更具体的来源。
         """
         with self.lock:
             conn = self._get_conn()
             try:
                 # 过滤掉 None 值，避免覆盖已有数据
                 valid_data = {k: v for k, v in kwargs.items() if v is not None}
+                if 'writer' not in valid_data:
+                    valid_data['writer'] = 'lofarb:fund_manager'
                 if not valid_data: return
 
                 cols = ['date', 'fund_code'] + list(valid_data.keys())

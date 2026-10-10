@@ -194,12 +194,14 @@ class StaticValuationCalculator:
             for _, row in df.iterrows():
                 if pd.notna(row['static_val']):
                     # [AI-2026-06-28] 直接写入 unified_fund_history（废弃 fund_data）
+                    # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 static_val 是谁写的"
                     cursor.execute("""
-                        INSERT INTO unified_fund_history (date, fund_code, static_val, valuation_error, calibration)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO unified_fund_history (date, fund_code, static_val, valuation_error, calibration, writer)
+                        VALUES (?, ?, ?, ?, ?, 'lofarb:static_valuation')
                         ON CONFLICT(date, fund_code) DO UPDATE SET 
                             static_val = excluded.static_val,
-                            valuation_error = excluded.valuation_error
+                            valuation_error = excluded.valuation_error,
+                            writer = 'lofarb:static_valuation'
                     """, (row['date'], fund_code, row['static_val'], row['val_error'], row.get('calibration')))
             conn.commit()
         finally:

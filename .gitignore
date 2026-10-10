@@ -23,6 +23,11 @@ account_private.py
 .env
 **/.env
 arbcore/scripts/
+# --- 个人脚本目录（不上传；2026-10-10 东哥定）---
+#   例外：ArbDashboard/frontend/scripts/wait-backend.mjs 是 npm run dev 的构建依赖，
+#   仍保留跟踪（前端 dev 流程需要）。如需彻底排除，见 _githooks/GITHUB_GOVERNANCE.md §9。
+/scripts/
+ArbDashboard/backend/scripts/
 **/private/
 **/Lazy*
 **/*lazy*
@@ -31,6 +36,13 @@ arbcore/scripts/
 **/auto_trade/
 # 根目录项目指引（含内部口径，不传）
 agents.md
+# --- 文档 / Markdown（一律不上传；2026-10-10 东哥定）---
+#   任何 .md / agents.md / docs/ 都不进 GitHub（公开仓只放源码）。
+**/*.md
+**/*.markdown
+**/AGENTS.md
+**/agents.md
+**/docs/
 # 本地代理/VPN 启动脚本（仅本机用，不传）
 Proxy.bat
 # 交易信号检测 / 前端下单逻辑（不传）

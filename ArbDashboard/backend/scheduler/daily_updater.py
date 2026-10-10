@@ -1891,8 +1891,9 @@ class DailyUpdater(BaseApp):
                         current_idx_close = idx_data[date]
                         # [AI-2026-08-06] 仅在 index_close 实际变化时才写回，避免每次启动全量冗余 UPDATE
                         if not _close(current_idx_close, existing_idx_close):
+                            # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 index_close 是谁写的"
                             cursor.execute(
-                                "UPDATE unified_fund_history SET index_close = ? "
+                                "UPDATE unified_fund_history SET index_close = ?, writer = 'lofarb:daily_updater.step11' "
                                 "WHERE fund_code = ? AND date = ?",
                                 (current_idx_close, fund_code, date))
                     else:
@@ -2014,9 +2015,10 @@ class DailyUpdater(BaseApp):
                             and _close(rt_premium, ex_rt_prem)):
                         continue  # 计算结果无变化，跳过写回
 
+                    # [AI-2026-10-09] 打 writer 标识，供事后追查"这行静态估值/溢价是谁写的"
                     cursor.execute(
                         "UPDATE unified_fund_history SET static_val=?, premium=?, "
-                        "index_pct=?, calibration=?, rt_premium=? "
+                        "index_pct=?, calibration=?, rt_premium=?, writer='lofarb:daily_updater.step11' "
                         "WHERE fund_code=? AND date=?",
                         (static_val, premium, index_pct, calibration, rt_premium,
                          fund_code, date))
@@ -2093,8 +2095,9 @@ class DailyUpdater(BaseApp):
                     _p_idx_pct = (_p_idx_ratio - 1) * 100
                     if _close(_p_static, _p_ex_static) and _close(_p_idx_pct, _p_ex_idxpct):
                         continue  # 无变化，跳过写回
+                    # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 T-1 待补静态估值是谁写的"
                     cursor.execute(
-                        "UPDATE unified_fund_history SET static_val = ?, index_close = ?, index_pct = ? "
+                        "UPDATE unified_fund_history SET static_val = ?, index_close = ?, index_pct = ?, writer = 'lofarb:daily_updater.step11.pending' "
                         "WHERE fund_code = ? AND date = ?",
                         (_p_static, float(_p_idx), _p_idx_pct, fund_code, _pdate))
                     if cursor.rowcount > 0:
@@ -2188,8 +2191,9 @@ class DailyUpdater(BaseApp):
         # 5. 写回 static_val（白银专属列，不碰其他字段）
         count = 0
         for val, date in updates:
+            # [AI-2026-10-09] 打 writer 标识，供事后追查"这行白银 static_val 是谁写的"
             cursor.execute(
-                "UPDATE unified_fund_history SET static_val=? WHERE fund_code='161226' AND date=?",
+                "UPDATE unified_fund_history SET static_val=?, writer='lofarb:daily_updater.step12' WHERE fund_code='161226' AND date=?",
                 (val, date))
             if cursor.rowcount > 0:
                 count += 1

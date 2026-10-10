@@ -8,7 +8,6 @@ futu_reader.py - 富途行情读取器模块
 
 import time
 import threading
-import pandas as pd
 import logging
 
 logger = logging.getLogger(__name__)
@@ -56,11 +55,10 @@ class FutuReader:
     """
 
     # [AI-2026-09-22] 订阅标的硬上限（额度收口）。
-    # 富途免费正股额度 100，但 QUOTE 与 ORDER_BOOK 分别计数、共享这 100：
-    # QUOTE 快照不含买一卖一，_get_prices_impl 对每个标的都要再订一次 ORDER_BOOK 取盘口
-    # ⇒ 实际 1 标的 = 2 额度，100 额度只装得下 ~50 个标的。
-    # 白名单（DB 权威篮子 ∪ IB 核心池）本身已远小于此值，此上限只作越界告警与截断保护。
-    FUTU_MAX_SUBSCRIBABLE = 50
+    # [AI-2026-10-10] 东哥拍板：砍掉 QUOTE 订阅（不需要"最新价" last），只保留 ORDER_BOOK
+    # 取真实买卖盘口（bid/ask 五档）。每标的额度从 2（QUOTE+ORDER_BOOK）降到 1（仅 ORDER_BOOK），
+    # 故硬上限从 50 升至 100，对齐富途平台 100 额度上限。
+    FUTU_MAX_SUBSCRIBABLE = 100
 
     @staticmethod
     def to_futu_code(symbol):
@@ -110,10 +108,10 @@ class FutuReader:
             ordered = ordered[:self.FUTU_MAX_SUBSCRIBABLE]
             logger.error(
                 f"[富途] 白名单 {len(codes)} 个标的超过硬上限 {self.FUTU_MAX_SUBSCRIBABLE}"
-                f"（1 标的 = 2 额度，100 额度上限）→ 以下 {len(over)} 个不订阅: {', '.join(over)}")
+                f"（1 标的 = 1 额度，仅 ORDER_BOOK）→ 以下 {len(over)} 个不订阅: {', '.join(over)}")
         self.subscription_allowlist = set(ordered)
         logger.info(f"[富途] 订阅白名单已生效: {len(ordered)} 个标的"
-                    f"（预计额度占用 ~{len(ordered) * 2}/100）")
+                    f"（预计额度占用 ~{len(ordered)}/100）")
         return len(ordered)
 
     def _is_allowed(self, futu_code) -> bool:
@@ -149,8 +147,7 @@ class FutuReader:
         self.port = port
         self.max_retries = max_retries
         self.connect_timeout = connect_timeout
-        self.prices = {}  # {symbol: {'bid': ..., 'ask': ..., 'last': ...}}
-        self.subscribed_codes = set()
+        self.prices = {}  # {symbol: {'bid': ..., 'ask': ..., 'last': 0.0}}
         self._order_book_subscribed = set()  # [AI-2026-08-03] ORDER_BOOK 订阅跟踪（get_order_book 取真实盘口用）
         self._order_book_needed = set()  # [AI-2026-09-21] 持久记录"需盘口订阅的标的"，重连后据此批量补订 ORDER_BOOK（重连不清空，区别于 _order_book_subscribed）
         # [AI-2026-09-22] 订阅白名单（额度收口）：见 set_subscription_allowlist()。
@@ -267,7 +264,6 @@ class FutuReader:
                     except:
                         pass
                 self.ctx = FutuReader._connect_with_timeout(self.host, self.port, timeout=5)
-                self.subscribed_codes = set()
                 self._order_book_subscribed = set()  # [AI-2026-08-06] 重建 ctx 必须同步清空 ORDER_BOOK 订阅集合，否则新连接无盘口订阅、_fetch_order_book 跳过订阅直取空盘口→bid/ask 永久为 None
                 logger.info(f"{'='*50}\n[富途] 连接成功 (第 {attempt} 次尝试)\n{'='*50}")
                 self.disabled = False
@@ -314,7 +310,6 @@ class FutuReader:
             
             try:
                 self.ctx = FutuReader._connect_with_timeout(self.host, self.port, timeout=5)
-                self.subscribed_codes = set()
                 self._order_book_subscribed = set()  # [AI-2026-08-06] 重建 ctx 必须同步清空 ORDER_BOOK 订阅集合（同 _try_connect_silent），否则新连接盘口订阅丢失、bid/ask 永久 None
                 self.disabled = False
                 self.connected = True  # [AI-2026-07-15] 与 IB 一致
@@ -392,7 +387,6 @@ class FutuReader:
                             except:
                                 pass
                         self.ctx = FutuReader._connect_with_timeout(self.host, self.port, timeout=5)
-                        self.subscribed_codes = set()
                         self._order_book_subscribed = set()  # [AI-2026-08-06] 懒重连建新 ctx 必须同步清空 ORDER_BOOK 订阅集合（同前），否则新连接盘口订阅丢失、bid/ask 永久 None
                         connected = True
                         logger.info(f"[富途] 连接成功 (第 {attempt} 次)")
@@ -439,152 +433,55 @@ class FutuReader:
             if not futu_codes:
                 return True, "无适用富途的数据标的", self.prices
 
-            new_codes = [c for c in futu_codes if c not in self.subscribed_codes]
-            
-            # 订阅新增加的股票，指定 Session.ALL 获取盘前盘后夜盘全时段数据
-            if new_codes:
-                # [AI-2026-08-26] 批量订阅优先：OpenD 正常时一次往返，大幅减少重连后的订阅风暴
-                # （34 标的原本 34 次往返 → 1 次）。批量失败再逐个回退，保留 [AI-2026-07-15] 容错：
-                # 单个符号失败（如 HSSI 非交易标的）不销毁整条连接。所有订阅调用走
-                # _call_with_timeout，防半开连接挂死。
-                valid_codes = []
-                if len(new_codes) > 1:
-                    try:
-                        ret, data = self._call_with_timeout(
-                            lambda: self.ctx.subscribe(new_codes, [SubType.QUOTE], session=Session.ALL),
-                            timeout=15)
-                        if ret == 0:
-                            valid_codes = list(new_codes)
-                        else:
-                            logger.warning(f"[富途] 批量订阅失败: {data}，逐个回退")
-                    except Exception as e:
-                        # 批量订阅超时/连接异常：连接多半已挂，直接清 ctx 重连，不做逐个回退（避免连环超时）
-                        logger.warning(f"[富途] 批量订阅异常: {e}，清空 ctx 重连")
-                        old = self.ctx
-                        self.ctx = None
-                        if old is not None:
-                            try:
-                                old.close()
-                            except:
-                                pass
-                        self.connected = False
-                        return False, f"富途订阅异常: {e}", self.prices
-                if not valid_codes:
-                    for code in new_codes:
-                        try:
-                            ret, data = self._call_with_timeout(
-                                lambda c=code: self.ctx.subscribe([c], [SubType.QUOTE], session=Session.ALL),
-                                timeout=10)
-                            if ret == 0:
-                                valid_codes.append(code)
-                            else:
-                                logger.warning(f"[富途] 订阅失败 {code}: {data}，跳过该标的")
-                        except Exception:
-                            # 单个订阅超时说明连接已挂，停止回退直接走重连
-                            logger.warning(f"[富途] 订阅超时 {code}，停止回退并清空 ctx")
-                            break
-                if valid_codes:
-                    self.subscribed_codes.update(valid_codes)
-                    logger.info(f"[富途] 已订阅: {', '.join(valid_codes)}")
-                # [AI-2026-09-21] Option C：不过度清 ctx，保留已成功的 ORDER_BOOK 盘口补订。
-                # 原逻辑：QUOTE 批量订阅本轮全失败时，若 subscribed_codes 也空就清空 ctx 重连。
-                # 问题：富途免费正股额度 100/100，盘中 get_prices 无上限累积订阅，第 101 个标的
-                # （XBI 等，不在 fund_basket_weights 内、由某次实时取价带入）触发整个批量订阅失败
-                # → 看似"全失败" → 清 ctx → 下次重连清空 _order_book_subscribed → 已成功的 ORDER_BOOK
-                # 盘口补订丢失 → etf_bid1/etf_ask1 反复写 0（09-18 分时断档根因之一）。
-                # 修复：只要已成功补订 ORDER_BOOK 盘口（_order_book_subscribed 非空），即证明 ctx 连接
-                # 仍存活、OpenD 可达，不应清 ctx；仅当 QUOTE 与 ORDER_BOOK 全未成功、历史上也无订阅时
-                # 才判连接断开、清 ctx 走重连。
-                if not valid_codes and not self.subscribed_codes and not self._order_book_subscribed:
-                    # 没有一个订阅成功且未订阅过任何标的 → 连接可能已断
-                    logger.warning("[富途] 所有标的订阅均失败，清空 ctx")
-                    old = self.ctx
-                    self.ctx = None
-                    if old is not None:
-                        try:
-                            old.close()
-                        except:
-                            pass
-                    self.connected = False
-                    return False, "富途所有标的订阅均失败", self.prices
-            
-            # 获取实时报价
-            # [AI-2026-08-26] 请求级超时：OpenD 半开连接时 SDK 会无限阻塞，这里 15s 内不返回即
-            # 抛 TimeoutError，由外层 except 清 ctx 走懒重连，避免拖死估值线程。
-            ret, data = self._call_with_timeout(
-                lambda: self.ctx.get_stock_quote(futu_codes), timeout=15)
-            if ret == 0:
-                got_any = False  # [AI-2026-08-26] 本轮是否取到真实盘口（区别于 self.prices 旧缓存）
-                for _, row in data.iterrows():
-                    futu_code = row['code']
-                    code = futu_code.replace('US.', '').replace('HK.', '')
-                    bid = 0.0
-                    ask = 0.0
-                    last = 0.0
-                    
-                    def safe_float(val):
-                        if pd.isna(val) or val == 'N/A' or val == '': return 0.0
-                        try:
-                            return float(val)
-                        except:
-                            return 0.0
+            # [AI-2026-10-10] 东哥拍板：砍掉 QUOTE 订阅与 get_stock_quote 调用，
+            # 只保留 ORDER_BOOK + get_order_book 取真实买卖盘口（bid/ask 五档）。
+            # "最新价" last 一律置 0.0（不兜底、不伪装），前端 price 字段由
+            # market_data_service 的 `last if last > 0 else bid` 自动退化为 bid。
+            # 每标的额度 2→1，FUTU_MAX_SUBSCRIBABLE 50→100。
+            got_any = False
+            for futu_code in futu_codes:
+                code = futu_code.replace('US.', '').replace('HK.', '')
+                ob_bid, ob_ask, ob_bid_sz, ob_ask_sz, ob_bids, ob_asks = self._fetch_order_book(futu_code)
 
-                    # [AI-2026-08-03] 富途 QUOTE 快照不含 bid/ask 列，必须 ORDER_BOOK + get_order_book 取真实买一卖一。
-                    # _fetch_order_book 返回 (bid, ask, bid_size, ask_size)；取不到则全 0（前端走"等待数据"）。
-                    last_0 = safe_float(row.get('last_price'))
-                    ob_bid, ob_ask, ob_bid_sz, ob_ask_sz, ob_bids, ob_asks = self._fetch_order_book(futu_code)
+                bid = ob_bid if ob_bid and ob_bid > 0 else 0.0
+                ask = ob_ask if ob_ask and ob_ask > 0 else 0.0
+                bid_size = ob_bid_sz if ob_bid_sz and ob_bid_sz > 0 else 0.0
+                ask_size = ob_ask_sz if ob_ask_sz and ob_ask_sz > 0 else 0.0
 
-                    bid = ob_bid if ob_bid and ob_bid > 0 else 0.0
-                    ask = ob_ask if ob_ask and ob_ask > 0 else 0.0
-                    bid_size = ob_bid_sz if ob_bid_sz and ob_bid_sz > 0 else 0.0
-                    ask_size = ob_ask_sz if ob_ask_sz and ob_ask_sz > 0 else 0.0
-                    last = last_0
+                # [AI-2026-08-04] INFO→DEBUG：此行每标的每轮各打一次，盘中每秒数十行，
+                # 是 ARM syslog 膨胀主因（单机 314M / 磁盘 +5pp 每天）。逐笔盘口属排障细节，
+                # 非运行必需；需要时用 LOG_LEVEL=DEBUG 打开。30 秒一次的价格心跳仍保留 INFO。
+                logger.debug(f"【富途盘口】 {code}: bid={bid}(×{bid_size}) ask={ask}(×{ask_size}) levels={len(ob_bids)}/{len(ob_asks)}")
 
-                    # [AI-2026-08-04] INFO→DEBUG：此行每标的每轮各打一次，盘中每秒数十行，
-                    # 是 ARM syslog 膨胀主因（单机 314M / 磁盘 +5pp 每天）。逐笔盘口属排障细节，
-                    # 非运行必需；需要时用 LOG_LEVEL=DEBUG 打开。30 秒一次的价格心跳仍保留 INFO。
-                    logger.debug(f"【富途盘口】 {code}: bid={bid}(×{bid_size}) ask={ask}(×{ask_size}) last={last} levels={len(ob_bids)}/{len(ob_asks)}")
+                # 只要有真实盘口就存，上游决定显示/估值（全 0 视为无数据由门禁处理）
+                if bid > 0 or ask > 0:
+                    got_any = True  # [AI-2026-08-26] 本轮取到数据（与旧缓存区分）
+                    self.prices[code] = {
+                        'bid': bid,
+                        'ask': ask,
+                        'last': 0.0,  # [AI-2026-10-10] 不再订阅 QUOTE，last 恒 0（前端 price 自动退化为 bid）
+                        'bid_size': bid_size,
+                        'ask_size': ask_size,
+                        # [AI-2026-08-17] 富途多档盘口（最多10档），供前端展示对比用，不参与估值计算
+                        'bid_levels': ob_bids,
+                        'ask_levels': ob_asks,
+                    }
+                    self.last_data_time = time.time()  # [AI-2026-07-15] 记录成功获取数据的时间戳
 
-                    # 只要有真实盘口或 last 就存，上游决定显示/估值（全 0 视为无数据由门禁处理）
-                    if last > 0 or bid > 0 or ask > 0:
-                        got_any = True  # [AI-2026-08-26] 本轮取到数据（与旧缓存区分）
-                        self.prices[code] = {
-                            'bid': bid,
-                            'ask': ask,
-                            'last': last,
-                            'bid_size': bid_size,
-                            'ask_size': ask_size,
-                            # [AI-2026-08-17] 富途多档盘口（最多10档），供前端展示对比用，不参与估值计算
-                            'bid_levels': ob_bids,
-                            'ask_levels': ob_asks,
-                        }
-                        self.last_data_time = time.time()  # [AI-2026-07-15] 记录成功获取数据的时间戳
-                
-                # 控制台心跳回显 (每30秒打印一次)
-                current_time = time.time()
-                if current_time - self.last_log_time >= 30:
-                    if self.prices:
-                        price_strs = [f"{k}=${v.get('last', 0):.2f}" for k, v in self.prices.items()]
-                        logger.info(f"[富途] 实时价格: {', '.join(price_strs)}")
-                    self.last_log_time = current_time
-                
-                # [V10.13] 如果没有任何标的获取到真实盘口（如非交易时段），返回失败而非成功
-                # [AI-2026-08-26] 判定基于本轮 got_any 而非 self.prices：断连后缓存保留旧价，
-                # 不能把旧缓存当成"本轮成功"，否则上游会误判行情新鲜。
-                if not got_any:
-                    return False, "本轮未获取到真实盘口数据", self.prices
-                return True, "成功获取富途价格", self.prices
-            else:
-                logger.warning(f"[富途] 获取数据失败: {data}，清空 ctx 下次可重连")
-                old = self.ctx
-                self.ctx = None
-                if old is not None:
-                    try:
-                        old.close()
-                    except:
-                        pass
-                self.connected = False
-                return False, f"富途API未运行: {data}", self.prices
+            # 控制台心跳回显 (每30秒打印一次) —— [AI-2026-10-10] 改用 bid 代替 last
+            current_time = time.time()
+            if current_time - self.last_log_time >= 30:
+                if self.prices:
+                    price_strs = [f"{k}=${v.get('bid', 0):.2f}" for k, v in self.prices.items()]
+                    logger.info(f"[富途] 实时盘口(bid): {', '.join(price_strs)}")
+                self.last_log_time = current_time
+
+            # [V10.13] 如果没有任何标的获取到真实盘口（如非交易时段），返回失败而非成功
+            # [AI-2026-08-26] 判定基于本轮 got_any 而非 self.prices：断连后缓存保留旧价，
+            # 不能把旧缓存当成"本轮成功"，否则上游会误判行情新鲜。
+            if not got_any:
+                return False, "本轮未获取到真实盘口数据", self.prices
+            return True, "成功获取富途价格", self.prices
                 
         except Exception as e:
             logger.warning(f"[富途] get_prices 异常: {e}")
