@@ -228,7 +228,7 @@ root_db_path = _resolve_db_path()
 # [AI-2026-08-16] 交易数据独立库：成交/配对/策略规则等敏感交易数据与市场因子分离，隐私保护
 tran_db_path = os.path.join(os.path.dirname(root_db_path), "arb_tran.db")
 logger.info(f"📂 Using database at {root_db_path}")
-logger.info(f"🔒 交易库 at {tran_db_path}")
+# [AI-2026-10-10] 交易库已剥离至 LOFTrader，删除启动日志（tran_db 路径变量保留，ledger_service 仍使用）
 
 # [AI-2026-10-07] 主库自检（防呆）：必须跑在下方 DatabaseManager 实例化**之前** ——
 # 一旦路径解析失误，os.makedirs + sqlite3.connect（默认 READWRITE|CREATE）会先静默造出
@@ -300,13 +300,10 @@ def _print_data_source_banners():
             return False
         return True
 
+    # [AI-2026-10-10] guojin/galaxy（QMT 交易客户端）已剥离至 LOFTrader，不再显示其连接状态 banner
     sources = [
         ("tdx",    "通达信",  _is_fetcher_connected(active.get("tdx")),
          "请点击左侧'通达信'按钮启动"),
-        ("guojin", "国金QMT", _is_fetcher_connected(active.get("guojin")),
-         "请点击左侧'国金QMT'按钮启动"),
-        ("galaxy", "银河QMT", _is_fetcher_connected(active.get("galaxy")),
-         "请点击左侧'银河QMT'按钮启动"),
         ("ib",     "IB 盈透证券",
          market_data_service.ib_reader is not None and getattr(market_data_service.ib_reader, 'connected', False),
          "请点击左侧'IB'按钮启动"),
@@ -332,7 +329,7 @@ config_service = ConfigService(db)
 #   LOFarb 自此为纯「数据 + 估值 + 看板」节点，恒不挂载任何交易组件 ——
 #   同时根治「两进程各持一个 RuleEngine 读同一规则表」的双下单风险。
 trading_service = None
-logger.info("[交易剥离] LOFarb 不挂载 TradingService（交易见 LOFTrader :8001）")
+# [AI-2026-10-10] 交易内核已剥离至 LOFTrader，删除确认性启动日志
 _active_watchlist = []
 _nav_last_updated = {"time": None, "date": None}
 _nav_scheduled_today_date = ""
@@ -382,15 +379,7 @@ def _popen_script_once(cmd, cwd, script_name: str) -> bool:
     subprocess.Popen(cmd, cwd=cwd)
     return True
 
-# 3. Try to load Private Plugins
-try:
-    from private.export_service import PrivateExportService
-    export_service = PrivateExportService(root_db_path, project_root)
-    logger.info("Private export plugins loaded.")
-except (ImportError, NameError) as e:
-    export_service = None
-    logger.info(f"Private export plugins not found or initialization failed: {e}")
-
+# [AI-2026-10-10] Private export 插件已剥离至 LOFTrader，移除挂载逻辑（.gitignore 已屏蔽 **/private/，不入库）
 # [AI-2026-10-08] LazyTrader 随交易内核剥离至 LOFTrader（交易见 :8001）。
 lazy_trader_instance = None
 
@@ -472,9 +461,7 @@ async def lifespan(app: FastAPI):
         
         asyncio.create_task(run_011_first())
 
-        # 2. 分时数据由 ARM 采集 → arm_sync_service 从 ARM 同步到本地（本地不自己采分时）
-        system_status.add_milestone("INFO", "分时数据依赖 ARM 采集同步 (本地不本地采样)")
-
+        # [AI-2026-10-10] 分时数据依赖 ARM milestone 已移除（纯噪声，无功能影响）
         # 3. 启动实时行情引擎（延迟10秒，等 011 任务先跑起来）
         # 011 需要 1-2 分钟，通达信可以稍后启动
         await dashboard_snapshot_service.start()
@@ -2036,32 +2023,7 @@ async def update_ib_core_symbols(request: Request):
 ALL_CATEGORIES = ["黄金原油", "QDII欧美", "QDII日本", "白银", "QDII亚洲", "国内LOF", "现金管理"]
 
 # [AI-2026-07-07] 回补缺失指数历史
-# --- Private / Custom Export APIs ---
-@app.get("/api/private/status")
-async def get_private_status():
-    """检测私密插件是否挂载"""
-    return {"status": "ok", "loaded": export_service is not None}
-
-@app.get("/api/private/export/{code}")
-async def export_fund_data(code: str):
-    if not export_service:
-        logger.warning(f"导出失败: 私有插件未加载 (code={code})")
-        return JSONResponse(status_code=403, content={"status": "error", "message": "Private export plugin not loaded"})
-    
-    csv_data, error = export_service.export_fund_to_csv(code)
-    if error:
-        logger.error(f"导出失败 (code={code}): {error}")
-        return JSONResponse(status_code=500, content={"status": "error", "message": error})
-    
-    from fastapi.responses import Response
-    return Response(
-        content=csv_data,
-        media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=fund_export_{code}.csv"
-        }
-    )
-
+# [AI-2026-10-10] Private export 端点已剥离至 LOFTrader（/api/private/status + /api/private/export/{code} 移除）
 @app.get("/api/private/lazy_calc")
 async def lazy_calc(fund_code: str = "162411"):
     """

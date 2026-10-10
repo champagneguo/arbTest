@@ -97,35 +97,7 @@
           </n-button>
         </n-card>
 
-        <!-- [AI-2026-07-09] 自留地 UI 改造：① 把"仅在本地..."小字移到标题"自留地"后面；② 删除"选择导出基金"label；③ 输入框宽度收窄到仅够8位代码 -->
-        <n-card :bordered="false" class="shadow-soft private-card" style="margin-top: 16px;">
-          <template #header>
-             <div class="flex-center gap-2" style="flex-wrap: wrap;">
-                <n-icon size="18" color="#64748b"><Database /></n-icon>
-                <span>自留地</span>
-                <n-text depth="3" style="font-size: 11px; color: #94a3b8;">
-                  * 该功能仅在本地环境且加载私有插件时可用
-                </n-text>
-             </div>
-          </template>
-          <div class="p-2 text-center" v-if="!isPrivateVisible">
-            <n-button quaternary block @click="checkPrivateAccess">进入私有空间</n-button>
-          </div>
-          <div v-else class="p-2 animate-fade-in">
-            <n-form-item label-placement="top">
-               <n-input v-model:value="exportCode" placeholder="输入 6 位代码" style="width: 110px;" />
-               <div class="flex gap-2 mt-2">
-                  <n-button v-for="code in quickCodes" :key="code" size="small" secondary @click="exportCode = code">
-                     {{ code }}
-                  </n-button>
-               </div>
-            </n-form-item>
-            <n-button type="primary" block style="margin-top: 10px;" @click="handleExport" :disabled="!exportCode">
-              <template #icon><n-icon><FileDown /></n-icon></template>
-              导出
-            </n-button>
-          </div>
-        </n-card>
+        <!-- [AI-2026-10-10] 自留地卡片（Private export 私有插件导出）已随交易内核剥离至 LOFTrader，此处整卡移除 -->
 
         <!-- [AI-2026-07-13] 历史数据导出卡片 -->
         <n-card :bordered="false" class="shadow-soft" style="margin-top: 16px;">
@@ -334,9 +306,6 @@ import { getDataStatus, getNavStatus } from '../api/systemApi'
 import client from '../api/client'
 
 const message = useMessage()
-const exportCode = ref('')
-const isPrivateVisible = ref(false)
-const quickCodes = ['162411', '164701', '164824', '161116']
 const exportShareDbLoading = ref(false)
 
 // 导入导出状态
@@ -587,46 +556,6 @@ const handleDeleteFund = async () => {
     }
   } catch (e) {
     message.error('删除失败')
-  }
-}
-
-const checkPrivateAccess = async () => {
-  try {
-    const res = await client.get('/api/private/status')
-    if (res.data.loaded) isPrivateVisible.value = true
-    else message.error('未挂载私有插件')
-  } catch (e) { message.error('验证失败') }
-}
-
-const handleExport = async () => {
-  try {
-    message.loading('正在生成导出文件...')
-    const res = await client.get(`/api/private/export/${exportCode.value}`, { responseType: 'blob' })
-    const url = window.URL.createObjectURL(new Blob([res.data]))
-    const link = document.createElement('a')
-    link.href = url
-    link.setAttribute('download', `fund_export_${exportCode.value}_${new Date().toISOString().split('T')[0]}.csv`)
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    message.success('导出成功')
-  } catch (e: any) {
-    // 尝试从 Blob 错误响应中提取真实错误信息
-    const errData = e?.response?.data
-    if (errData instanceof Blob) {
-      try {
-        const text = await errData.text()
-        const json = JSON.parse(text)
-        if (json?.message) {
-          console.error('[导出失败]', json.message)
-          message.error(`导出失败: ${json.message}`)
-          return
-        }
-      } catch { /* ignore parse errors */ }
-    }
-    const errMsg = e?.response?.data?.message || e?.message || '未知错误'
-    console.error('[导出失败]', errMsg)
-    message.error(`导出失败: ${errMsg}`)
   }
 }
 

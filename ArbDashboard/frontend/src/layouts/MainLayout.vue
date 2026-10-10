@@ -239,13 +239,14 @@ const menuOptions = [
   //   两者均为交易台能力（规则引擎 / 套利账本），按目标架构已归属 LOFTrader(:5174)，
   //   不应出现在 LOFarb(数据/估值/看板)。路由与页面保留未删（后端端点仍供 LOFTrader 透传调用），
   //   仅移除 LOFarb 侧边栏暴露的入口，求稳可逆。
-  {
-    label: () => h(RouterLink, { to: '/etf-rotation' }, { default: () => 'ETF轮动' }),
-    key: 'etf-rotation'
-  },
+  // [AI-2026-10-10] 「原油穿透」菜单项上移到「ETF轮动」之前，顺序 = 套利看板 / 原油穿透 / ETF轮动 / 系统配置
   {
     label: () => h(RouterLink, { to: '/penetration' }, { default: () => '原油穿透' }),
     key: 'penetration'
+  },
+  {
+    label: () => h(RouterLink, { to: '/etf-rotation' }, { default: () => 'ETF轮动' }),
+    key: 'etf-rotation'
   },
   {
     label: () => h(RouterLink, { to: '/settings' }, { default: () => '系统配置' }),

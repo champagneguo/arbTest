@@ -86,7 +86,15 @@ const router = createRouter({
           component: () => import('../views/HoldingAnalysis.vue')
         },
         {
+          // [AI-2026-10-10] /penetration 改为「原油穿透」三基金持仓口径页（OilPenetration），
+          //   菜单「原油穿透」仍指此页；旧单基金底层资产穿透页挪到 /penetration-detail（query 传递保留）
           path: 'penetration',
+          name: 'OilPenetration',
+          component: () => import('../views/OilPenetration.vue')
+        },
+        {
+          // [AI-2026-10-10] 旧单基金穿透页（HoldingAnalysis「穿透分析」按钮跳转目标）
+          path: 'penetration-detail',
           name: 'Penetration',
           component: () => import('../views/Penetration.vue')
         }

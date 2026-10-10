@@ -1257,6 +1257,46 @@ funds:
     - guojin
     - tencent
     - sina
+# [AI-2026-10-10] 补 159985 豆粕ETF华夏（铁律15：DB已有，YAML同步）：
+# DB unified_fund_list: category=商品/related_index空/pos_ratio 0.95/target_type=ETF；
+# 驱动=大商所豆粕期货M（新浪 nf_M0，fund_service.py:2019 硬编码分支）；
+# 与 161226 AG0 对称镜像（futures 模板），无篮子权重/fund_daily_factors。
+- code: '159985'
+  name: 豆粕ETF华夏
+  category: 商品
+  trade_etf: ''
+  trade_future: M0
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio: []
+  sina_index_url: ''
+  holdings_portfolio: []
+  future_hedging:
+  - symbol: 豆粕M
+    delivery_month: '2601'
+    weight: 100.0
+    currency: CNY
+    exchange: DCE
+    name: 大连商品交易所主连
+  sub_category: 其他
+  woody_supported: false
+  data_source: m0
+  related_index: ''
+  valuation_method: futures
+  static_valuation:
+    basis: futures
+    symbol: M0
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: futures
+    symbol: M0
+    source_priority:
+    - tdx
+    - guojin
+    - tencent
+    - sina
 - code: '159561'
   name: 德国ETF嘉实
   category: QDII欧美

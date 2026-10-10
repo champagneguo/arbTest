@@ -1222,10 +1222,11 @@ const penetratedPct = computed(() => {
 })
 
 // 跳转到穿透分析页
+// [AI-2026-10-10] /penetration 已改挂「原油穿透」三基金页，单基金底层资产穿透页挪到 /penetration-detail
 const goToPenetration = () => {
   if (!fundCode.value || !currentPeriod.value) return
   router.push({
-    path: '/penetration',
+    path: '/penetration-detail',
     query: { fund_code: fundCode.value, period: currentPeriod.value }
   })
 }

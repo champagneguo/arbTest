@@ -123,7 +123,9 @@ class RealtimeMarketManager:
             source_name_cn = source_name_map.get(source_name_key, source_name_key)
 
             if source_name_key in client_source_keys and not is_cloud:
-                logger.info(f"⏳ {source_name_cn} 本地模式：不自动实例化/连接，等待用户点击侧边按键")
+                # [AI-2026-10-10] guojin/galaxy 已剥离至 LOFTrader，仅对 tdx 打印本地模式日志
+                if source_name_key == "tdx":
+                    logger.info(f"⏳ {source_name_cn} 本地模式：不自动实例化/连接，等待用户点击侧边按键")
                 continue
 
             config_dict = {}

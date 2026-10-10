@@ -823,6 +823,27 @@ class DailyUpdater(BaseApp):
         conn_ufl.close()
         self.logger.info(f"📋 共 {len(all_codes)} 只基金，开始从腾讯日K线获取官方收盘价...")
 
+        # [AI-2026-10-10] VPS优先：先尝试从东京VPS拉取当日收盘价（prices_{date}.json），
+        # 若全覆盖则直接返回，减少本地直连腾讯/新浪的请求量。
+        vps_prices = self._try_sync_all_from_vps('prices')
+        if vps_prices:
+            vps_codes_covered = set()
+            for entry in vps_prices:
+                content = entry.get('content', {})
+                for row in content.get('rows', []):
+                    code_v = str(row.get('code', ''))
+                    date_v = row.get('date', '')
+                    close_v = row.get('close')
+                    vol_v = row.get('volume', 0)
+                    amt_v = row.get('amount_wan', 0)
+                    if code_v and date_v and close_v and close_v > 0:
+                        self._safe_save_fund_data(date_str=date_v, fund_code=code_v, price=close_v, trade_volume=vol_v, volume=amt_v)
+                        vps_codes_covered.add(code_v)
+            if vps_codes_covered.issuperset(set(all_codes)):
+                self.logger.info(f"✅ [VPS] 收盘价已全覆盖 {len(vps_codes_covered)} 只基金，跳过本地采集")
+                return
+            self.logger.info(f"📥 [VPS] 收盘价部分覆盖 {len(vps_codes_covered)}/{len(all_codes)} 只，其余走本地直连")
+
         # [AI-2026-08-03] 无日K线基金跳过名单（持久化）：腾讯/新浪均无日K线的基金（债券/封闭LOF）
         # 首次探测到即写入 arbcore/config/no_kline_funds.json，后续启动直接跳过，不再刷 WARNING。
         no_kline = _load_no_kline_denylist()
@@ -997,6 +1018,22 @@ class DailyUpdater(BaseApp):
         conn_ufl.close()
         fund_categories = {str(r[0]): (r[1] or '') for r in all_fund_rows if r[0]}
         all_codes = list(fund_categories.keys())
+
+        # [AI-2026-10-10] VPS优先：先尝试从东京VPS拉取净值（nav_{date}.json），
+        # 全量导入后由下方 per-code expected_nav_date 检查自然跳过已补齐的 code。
+        vps_nav = self._try_sync_all_from_vps('nav')
+        if vps_nav:
+            vps_nav_codes = set()
+            for entry in vps_nav:
+                content = entry.get('content', {})
+                for row in content.get('rows', []):
+                    code_v = str(row.get('code', ''))
+                    date_v = row.get('date', '')
+                    nav_v = row.get('nav')
+                    if code_v and date_v and nav_v:
+                        self._safe_save_fund_data(date_str=date_v, fund_code=code_v, nav=nav_v)
+                        vps_nav_codes.add(code_v)
+            self.logger.info(f"📥 [VPS] 净值已导入 {len(vps_nav_codes)} 只基金，其余走本地东财直连")
         # [AI-2026-07-23] QDII欧美/黄金原油（美股基金）净值在北京时间上午尚未发布，
         # 按 expected = T-2 判定，下午 3 点后才改为 T-1，避免无谓的东财抓取。
         # [AI-2026-08-06] 国内LOF/指数LOF/QDII亚洲/QDII日本 与 A 股同日收盘、无时差，
@@ -1212,7 +1249,28 @@ class DailyUpdater(BaseApp):
         # index_history 落库符号集 = INDEX 类型 ∪ 被用作 related_index 的 ETF
         index_write_syms = {s for s, (m, a) in sym_meta.items() if a == 'INDEX'} | related_index_syms
 
+        # [AI-2026-10-10] VPS优先：先尝试从东京VPS拉取美股/指数日线（usa_prices_{date}.json），
+        # 已覆盖的 symbol 在下方 per-symbol 循环中跳过，减少本地直连新浪的请求量。
+        vps_usa_covered = set()
+        vps_usa = self._try_sync_all_from_vps('usa_prices')
+        if vps_usa:
+            for entry in vps_usa:
+                content = entry.get('content', {})
+                for row in content.get('rows', []):
+                    sym_v = str(row.get('symbol', ''))
+                    date_v = row.get('date', '')
+                    close_v = row.get('close')
+                    if sym_v and date_v and close_v and close_v > 0:
+                        self.db.upsert_usa_etf_price(date=date_v, symbol=sym_v, price=float(close_v))
+                        if sym_v in index_write_syms:
+                            self.db.upsert_index_history(symbol=sym_v, date=date_v, close=float(close_v))
+                        vps_usa_covered.add(sym_v)
+            self.logger.info(f"📥 [VPS] 美股/指数日线已覆盖 {len(vps_usa_covered)} 只标的，其余走本地直连")
+
         for sym in symbols:
+            # [AI-2026-10-10] VPS 已覆盖的标的跳过本地直连（此前漏写 continue，VPS 块形同虚设、新浪请求量未减）
+            if sym in vps_usa_covered:
+                continue
             df = self.hist_manager.get_prices(sym, source="sina", start_date=start_date)
             if not df.empty:
                 skipped_count = 0
@@ -1300,8 +1358,34 @@ class DailyUpdater(BaseApp):
     # Yahoo ^HSSI 已下架(404)，woody 自身也是用新浪 rt_hkHSSI 日记录器维护 ^HSSI 历史。
     def step5b2_record_hssi_daily(self):
         """从新浪记录 HSSI 昨收，写 index_history(HSSI, source='sina')。
-        早晨(港股已收盘)跑时 rt_hkHSSI[3]=昨收=上一港股交易日收盘。"""
+        早晨(港股已收盘)跑时 rt_hkHSSI[3]=昨收=上一港股交易日收盘。
+
+        [AI-2026-10-10] ⚠️ LOFarb 已停用 HSSI：SZ161124 已迁 ETFarb，
+        LOFarb 不再记录 HSSI 昨收（下方实现保留供 ETFarb 复用，东哥 2026-10-10 指令）。
+        """
+        self.logger.info("⏭️ [步骤五B2] HSSI 已停用（SZ161124 迁 ETFarb），跳过记录")
+        return
+        # [AI-2026-10-10] 以下实现保留（LOFarb 不再执行，供 ETFarb 参考复用）：
         self.logger.info("=== 步骤五B2：新浪 HSSI 昨收记录器 ===")
+
+        # [AI-2026-10-10] VPS优先：先尝试从东京VPS拉取 HSSI 昨收（hssi_{date}.json），
+        # 成功则写入 index_history 并直接返回，减少本地直连新浪的请求量。
+        vps_hssi = self._try_sync_all_from_vps('hssi')
+        # [AI-2026-10-10] 只取 file date 最新的一份（原 for 循环取首份并 return，多日积压时会写入旧数据）
+        if vps_hssi:
+            best = max(vps_hssi, key=lambda e: str(e.get('date', '')))
+            content = best.get('content', {})
+            close_v = content.get('close')
+            if close_v:
+                # 与本地逻辑一致：rt_hkHSSI[3] 是昨收，归属日期为上一交易日（跳周末）
+                d = datetime.now().date() - timedelta(days=1)
+                while d.weekday() >= 5:
+                    d -= timedelta(days=1)
+                date_str = d.strftime('%Y-%m-%d')
+                self.db.upsert_index_history(symbol='HSSI', date=date_str, close=float(close_v), source='vps')
+                self.logger.info(f"   ✅ [HSSI VPS] {date_str} -> close={close_v} (source=vps, file={best.get('date')})")
+                return
+
         try:
             # [AI-2026-08-21] 新浪请求节流
             import time as _tu
@@ -1627,6 +1711,39 @@ class DailyUpdater(BaseApp):
         if self.db.is_access_synced_today(today_str, source='shares_direct_sync'):
             self.logger.info("✅ 今日份额已直采，跳过")
             return
+
+        # [AI-2026-10-10] VPS优先：先尝试从东京VPS拉取份额（shares_{date}.json）。
+        # 仅当 VPS 覆盖了本地直采标的全集（_share_codes()）才标记防刷并跳过本地直采；
+        # 部分覆盖（如 30/35）严禁提前 return——否则未覆盖标的当日无份额，静默数据缺口。
+        vps_shares = self._try_sync_all_from_vps('shares')
+        if vps_shares:
+            expected_share_codes = set(self._share_codes())
+            vps_rows_count = 0
+            vps_codes = set()
+            for entry in vps_shares:
+                content = entry.get('content', {})
+                for row in content.get('rows', []):
+                    code_v = str(row.get('code', ''))
+                    date_v = row.get('date', '')
+                    shares_v = row.get('shares')
+                    if code_v and date_v and shares_v is not None:
+                        try:
+                            self.db.save_unified_history(date_str=date_v, fund_code=code_v, shares=float(shares_v))
+                            vps_rows_count += 1
+                            vps_codes.add(code_v)
+                        except Exception as e:
+                            self.logger.debug(f"   [VPS份额] 入库 {code_v} {date_v} 失败: {e}")
+            if expected_share_codes and expected_share_codes.issubset(vps_codes):
+                self.logger.info(f"📥 [VPS] 份额已导入 {vps_rows_count} 行（覆盖全部 {len(expected_share_codes)} 只标的），跳过本地直采")
+                self.db.mark_access_synced(today_str, source='shares_direct_sync')
+                return
+            if vps_rows_count > 0:
+                missing = sorted(expected_share_codes - vps_codes)
+                self.logger.warning(
+                    f"⚠️ [VPS] 份额覆盖不全（{len(vps_codes & expected_share_codes)}/{len(expected_share_codes)}，缺 {missing[:8]}），转本地直采补齐"
+                )
+            else:
+                self.logger.info("⏭️ [VPS] 无今日份额数据，走本地直采")
 
         try:
             S = self._import_share_fetcher()

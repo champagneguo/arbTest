@@ -91,7 +91,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, h, computed, watch, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+// [AI-2026-10-10] 移除 useRouter/router：名称列不再跳转持仓分析页，router 在本文件已无引用
 import { storeToRefs } from 'pinia'
 import {
   NGrid, NGi, NCard, NIcon, NText, NInput,
@@ -105,13 +105,12 @@ import { useFundStore, useMarketStore, useAppStore } from '../store'
 import { formatPrice, formatValuation, formatPercent, formatPremium,
          formatVolume, formatShares, formatSharesChange, formatTurnoverRate,
          formatIndexPrice, priceColor, shortDate, cleanFundName } from '../utils'
-import { getFundHoldingRealtime } from '../api/fundApi'
+// [AI-2026-10-10] 主看板移除原油持仓口径小字/表头T-2净值改名：fundApi 实时持仓接口导入已删（迁往原油穿透页）
 import SilverRatio from './SilverRatio.vue'
 import FundHistoryModal from '../components/FundHistoryModal.vue'
 
-const router = useRouter()
-
 // ===== Stores =====
+// [AI-2026-10-10] 删除 const router = useRouter()：名称列跳转入口已移除，router 无其它引用
 const fundStore = useFundStore()
 const marketStore = useMarketStore()
 const appStore = useAppStore()
@@ -125,30 +124,7 @@ const curPrice = (row: any): number => {
   return row?.price || 0
 }
 
-// [2026-09-29] 原油三基金主看板双估值：在现有 4 列内换行追加「我们自己的季报持仓口径」估值。
-// 复用 /api/fund/{code}/holding-realtime（Model B），与 HoldingAnalysis 同源同口径、零后端改动。
-// 端点返回 {data:{contracts:{合约:{realtime_nav, base_nav, ...}}}}，取首个合约(=当前近月，与 firstContract 一致)。
-// 注：这三只与 HOLDING_ANALYSIS_FUNDS 白名单相同（同一组原油 LOF）。
-const OIL_RT_FUNDS = ['160723', '161129', '501018']
-const isOilFund = (code: string) => OIL_RT_FUNDS.includes(code)
-const oilHoldingMap = ref<Record<string, { realtime_nav: number | null; base_nav: number | null }>>({})
-const fetchOilHolding = async () => {
-  await Promise.all(OIL_RT_FUNDS.map(async (code: string) => {
-    try {
-      const res: any = await getFundHoldingRealtime(code)
-      const d = res?.data?.data
-      if (d && d.contracts) {
-        const keys = Object.keys(d.contracts)
-        const c = d.contracts[keys[0]]
-        oilHoldingMap.value[code] = {
-          realtime_nav: c?.realtime_nav ?? null,
-          base_nav: c?.base_nav ?? null,
-        }
-      }
-    } catch (e) { /* 保留上次成功值，不清除 */ }
-  }))
-}
-let oilPollTimer: any = null
+// [AI-2026-10-10] 主看板移除原油持仓口径小字/表头T-2净值改名：原油三基金双估值整块（常量+轮询器）已删，数据源迁往原油穿透页
 
 // ===== 从 Store 解构响应式状态（保持与模板同名的变量，避免改模板） =====
 const { tableData, loading, currentTab, searchKeyword, watchlist,
@@ -316,19 +292,15 @@ onMounted(() => {
   updateTime()
   fetchRates()
   clockTimer = setInterval(updateTime, 1000)
-  // [2026-09-29] 原油三基金双估值：立即拉一次 + 每 20s 轮询 Model B 实时估值
-  fetchOilHolding()
-  oilPollTimer = setInterval(fetchOilHolding, 20000)
+  // [AI-2026-10-10] 主看板移除原油持仓口径小字/表头T-2净值改名：onMounted 内原油持仓轮询调用已删
 })
 onUnmounted(() => {
   if (refreshTimer) clearInterval(refreshTimer)
   if (clockTimer) clearInterval(clockTimer)
-  if (oilPollTimer) clearInterval(oilPollTimer)
+  // [AI-2026-10-10] 主看板移除原油持仓口径小字/表头T-2净值改名：onUnmounted 内原油轮询清除已删
 })
 
-// [AI-2026-09-12] 已支持「季报持仓分析」的原油基金白名单（东哥口径：短期只做这三只）。
-// 名单内：名称列显示绿色背景、可点击跳转；名单外：正常底色、不可点击。
-const HOLDING_ANALYSIS_FUNDS = ['160723', '161129', '501018']
+// [AI-2026-10-10] 主看板移除原油持仓口径小字/表头T-2净值改名：名称列不再使用原油白名单做特殊样式/点击跳转，常量已删
 
 const allColumns: DataTableColumns<any> = [
   {
@@ -349,23 +321,9 @@ const allColumns: DataTableColumns<any> = [
     title: '名称', key: 'fund_name', width: 130, fixed: 'left', align: 'center', ellipsis: { tooltip: true },
     className: 'col-fund-name',
     render(row: any) {
-      const canAnalyze = HOLDING_ANALYSIS_FUNDS.includes(row.fund_code)
-      return h('span', {
-        class: 'fund-name-cell' + (canAnalyze ? ' clickable-cell' : ''),
-        style: canAnalyze
-          ? { background: 'var(--co-accent-soft)', color: 'var(--co-accent-text)', padding: '2px 6px', borderRadius: '4px', cursor: 'pointer', fontWeight: '600' }
-          : { cursor: 'default' },
-        // [AI-2026-10-09] 整行点击上线后必须 stopPropagation：
-        //   本列（白名单内基金）是跳「季报持仓分析」的独立入口，
-        //   不阻断的话点基金名会同时弹基金详情 + 跳转，行为冲突。
-        onClick: canAnalyze
-          ? (e: MouseEvent) => {
-              e.stopPropagation()
-              router.push({ path: '/holding-analysis', query: { code: row.fund_code, name: row.fund_name } })
-            }
-          : undefined,
-        title: canAnalyze ? '查看季报持仓分析' : undefined,
-      }, cleanFundName(row.fund_name))
+      // [AI-2026-10-10] 主看板移除原油持仓口径小字：名称列去掉 canAnalyze 特殊样式/点击跳转，
+      // 三个原油基金名称恢复与其它基金完全一样的普通格式
+      return h('span', {}, cleanFundName(row.fund_name))
     }
   },
   {
@@ -409,14 +367,7 @@ const allColumns: DataTableColumns<any> = [
       } else {
         top = h('span', { class: cellCls, onClick, title: tip }, '-')
       }
-      // [2026-09-29] 原油三基金：换行追加我们的季报持仓口径实时估值(Model B)
-      const oil = oilHoldingMap.value[row.fund_code]
-      if (isOilFund(row.fund_code) && oil?.realtime_nav != null) {
-        return h('div', { style: 'line-height:1.3;' }, [
-          top,
-          h('div', { style: 'font-size:10px;color:#2563eb;margin-top:1px;', title: '我们的季报持仓口径 实时估值(Model B)' }, '持仓 ' + oil.realtime_nav.toFixed(4))
-        ])
-      }
+      // [AI-2026-10-10] 主看板移除原油持仓口径小字：rt_val 列不再追加"持仓实时估值(Model B)"小字
       return top
     }
   },
@@ -431,15 +382,7 @@ const allColumns: DataTableColumns<any> = [
         return h('span', { class: 'num-cell strong compact', style: { color: priceColor(p) } }, children)
       }
       const top = makeTop()
-      // [2026-09-29] 原油三基金：换行追加我们的季报持仓口径实时溢价(÷持仓实时估值)
-      const oil = oilHoldingMap.value[row.fund_code]
-      if (isOilFund(row.fund_code) && oil?.realtime_nav != null && curPrice(row)) {
-        const p = (curPrice(row) / oil.realtime_nav - 1) * 100
-        return h('div', { style: 'line-height:1.3;' }, [
-          top,
-          h('div', { style: 'font-size:10px;color:#2563eb;margin-top:1px;' }, formatPremium(p))
-        ])
-      }
+      // [AI-2026-10-10] 主看板移除原油持仓口径小字：rt_premium 列不再追加"÷持仓实时估值"小字
       return top
     }
   },
@@ -470,14 +413,7 @@ const allColumns: DataTableColumns<any> = [
         class: 'num-cell strong clickable-cell',
         title: '点击该行查看基金详情'
       }, val)
-      // [2026-09-29] 原油三基金：换行追加我们的季报持仓口径 T-1 静态估值(hsv)
-      const oil = oilHoldingMap.value[row.fund_code]
-      if (isOilFund(row.fund_code) && oil?.base_nav != null) {
-        return h('div', { style: 'line-height:1.3;' }, [
-          top,
-          h('div', { style: 'font-size:10px;color:#2563eb;margin-top:1px;', title: '我们的季报持仓口径 T-1 静态估值' }, '持仓 ' + oil.base_nav.toFixed(4))
-        ])
-      }
+      // [AI-2026-10-10] 主看板移除原油持仓口径小字：static_val 列不再追加"÷T-1持仓静态估值"小字
       return top
     }
   },
@@ -487,15 +423,7 @@ const allColumns: DataTableColumns<any> = [
       const top = !row.static_premium
         ? h('span', { class: 'num-cell compact' }, '-')
         : h('span', { class: 'num-cell compact', style: { color: priceColor(row.static_premium) } }, formatPremium(row.static_premium))
-      // [2026-09-29] 原油三基金：换行追加我们的季报持仓口径静态溢价(÷T-1持仓静态估值)
-      const oil = oilHoldingMap.value[row.fund_code]
-      if (isOilFund(row.fund_code) && oil?.base_nav != null && curPrice(row)) {
-        const p = (curPrice(row) / oil.base_nav - 1) * 100
-        return h('div', { style: 'line-height:1.3;' }, [
-          top,
-          h('div', { style: 'font-size:10px;color:#2563eb;margin-top:1px;' }, formatPremium(p))
-        ])
-      }
+      // [AI-2026-10-10] 主看板移除原油持仓口径小字：static_premium 列不再追加"÷T-1持仓静态估值溢价"小字
       return top
     }
   },
@@ -797,7 +725,8 @@ const columns = computed<DataTableColumns<any>>(() => {
   const navCol = cols.find(c => c.key === 'nav')
   if (navCol) {
     if (t1Tabs.includes(currentTab.value)) navCol.title = 'T-1日净值'
-    else if (t2Tabs.includes(currentTab.value)) navCol.title = 'T-2日净值'
+    // [AI-2026-10-10] 主看板移除原油持仓口径小字/表头T-2净值改名：t2Tabs 分支表头去掉「日」字（t1Tabs/默认分支不动）
+    else if (t2Tabs.includes(currentTab.value)) navCol.title = 'T-2净值'
     else navCol.title = 'T-2/1日净值'
   }
 
@@ -931,11 +860,7 @@ const tableScrollX = computed(() => {
   font-weight: 700;
   color: #1f2937;
 }
-.fund-name-cell {
-  color: #1f2937;
-  font-size: 12px;
-  font-weight: 700;
-}
+/* [AI-2026-10-10] 删除 .fund-name-cell：名称列已改回普通 span，该 class 无引用 */
 .num-cell {
   font-family: "Inter", "Fira Code", Consolas, sans-serif;
   font-size: 13px;
