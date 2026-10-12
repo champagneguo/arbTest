@@ -1,5 +1,7 @@
 <template>
   <div>
+    <!-- [AI-2026-10-12 重做 统一字体/表头] 本文件等宽字体已批量（replace_all）统一为 var(--co-font-mono)：
+         模板内 font-family 值与 :style 对象的 fontFamily 值均替换；字体 token 定义见 App.vue。 -->
     <!-- =============================================================
          统一参数区: T-2 基准日 + T-1 估值日 + 实时数据
          ============================================================= -->
@@ -23,14 +25,14 @@
           <n-divider vertical style="margin: 0" />
           <div style="width: 140px">
             💰 <strong>净值</strong>
-            <span style="color: var(--co-accent-text); font-weight: bold; font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-weight: bold; font-family: var(--co-font-mono)">{{
               Number(calc.meta.value?.base_data?.nav || 0).toFixed(4)
             }}</span>
           </div>
           <n-divider vertical style="margin: 0" />
           <div style="width: 110px">
             💱 <strong>汇率</strong>
-            <span style="font-family: monospace">{{
+            <span style="font-family: var(--co-font-mono)">{{
               Number(calc.meta.value?.base_data?.exchange_rate || 0).toFixed(4)
             }}</span>
           </div>
@@ -39,7 +41,7 @@
             <n-divider vertical style="margin: 0" />
             <div style="width: 160px">
               📊 <strong>{{ calc.meta.value?.fund_config?.trade_future }}校准因子</strong>
-              <span style="font-family: monospace; color: var(--co-text-2)">{{
+              <span style="font-family: var(--co-font-mono); color: var(--co-text-2)">{{
                 calc.meta.value?.base_data?.calibration
                   ? Number(calc.meta.value.base_data.calibration).toFixed(3)
                   : '-'
@@ -61,14 +63,14 @@
           <n-divider vertical style="margin: 0" />
           <div style="width: 140px">
             💰 <strong>估值</strong>
-            <span style="color: var(--co-accent-text); font-weight: bold; font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-weight: bold; font-family: var(--co-font-mono)">{{
               Number(calc.meta.value?.t1_data?.static_val || 0).toFixed(4)
             }}</span>
           </div>
           <n-divider vertical style="margin: 0" />
           <div style="width: 110px">
             💱 <strong>汇率</strong>
-            <span style="font-family: monospace">{{
+            <span style="font-family: var(--co-font-mono)">{{
               Number(calc.meta.value?.t1_data?.exchange_rate || 0).toFixed(4)
             }}</span>
           </div>
@@ -77,7 +79,7 @@
             <n-divider vertical style="margin: 0" />
             <div style="width: 160px">
               📊 <strong>{{ calc.meta.value?.fund_config?.trade_future }}校准因子</strong>
-              <span style="font-family: monospace; color: var(--co-text-2)">{{
+              <span style="font-family: var(--co-font-mono); color: var(--co-text-2)">{{
                 calc.meta.value?.t1_data?.calibration
                   ? Number(calc.meta.value.t1_data.calibration).toFixed(3)
                   : '-'
@@ -100,20 +102,20 @@
               :value="calc.simLofPrice.value"
               @input="onSimLofPriceInput"
               step="0.001"
-              style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-up); font-weight: bold; text-align: center"
+              style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-up); font-weight: bold; text-align: center"
             />
           </div>
           <n-divider vertical style="margin: 0" />
           <div style="width: 110px">
             💱 <strong style="color: var(--co-accent-text)">汇率</strong>
-            <span style="font-size: 14px; font-weight: bold; color: var(--co-accent-text); font-family: monospace">{{
+            <span style="font-size: 14px; font-weight: bold; color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               Number(calc.latestExchangeRateInput.value).toFixed(4)
             }}</span>
           </div>
           <n-divider vertical style="margin: 0" />
           <div style="flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0">
             <strong style="color: var(--co-text-3)">外盘源</strong>
-            <span style="font-size: 12px; color: var(--co-text-3); font-family: monospace">{{ calc.foreignSource.value }}</span>
+            <span style="font-size: 12px; color: var(--co-text-3); font-family: var(--co-font-mono)">{{ calc.foreignSource.value }}</span>
             <span style="font-size: 11px; color: var(--co-text-3); margin-left: auto; white-space: nowrap">本地深度源: {{ calc.localDepthSource.value }}</span>
           </div>
         </div>
@@ -166,7 +168,7 @@
           <div style="flex: 1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
             <span style="font-size: 14px; font-weight: bold; color: var(--co-accent-text)">估值参数</span>
             <span style="font-size: 12px; color: var(--co-text-3)">最新净值:</span>
-            <span style="font-family: monospace; font-weight: bold; color: var(--co-accent-text); font-size: 14px">{{
+            <span style="font-family: var(--co-font-mono); font-weight: bold; color: var(--co-accent-text); font-size: 14px">{{
               calc.meta.value?.latest_nav
                 ? Number(calc.meta.value.latest_nav).toFixed(4)
                 : calc.meta.value?.base_data?.nav
@@ -174,7 +176,7 @@
                   : '-'
             }}</span>
             <span style="font-size: 12px; color: var(--co-text-3)">日均增长:</span>
-            <span style="font-family: monospace; font-weight: bold; color: var(--co-down); font-size: 14px">{{
+            <span style="font-family: var(--co-font-mono); font-weight: bold; color: var(--co-down); font-size: 14px">{{
               calc.meta.value?.avg_daily_growth
                 ? (calc.meta.value.avg_daily_growth * 10000).toFixed(1) + '万'
                 : '-'
@@ -183,7 +185,7 @@
           <n-divider vertical style="margin: 0" />
           <div style="display: flex; align-items: center; gap: 8px">
             <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold">预估净值:</span>
-            <span style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: monospace">{{
+            <span style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               calc.meta.value?.estimated_nav && calc.meta.value.estimated_nav > 0
                 ? calc.meta.value.estimated_nav.toFixed(4)
                 : '-'
@@ -199,7 +201,7 @@
                       ? 'var(--co-up)'
                       : 'var(--co-down)'
                     : 'var(--co-neutral)',
-                fontFamily: 'monospace',
+                fontFamily: 'var(--co-font-mono)',
                 width: '70px',
                 textAlign: 'left',
               }"
@@ -247,7 +249,7 @@
             type="number"
             v-model.number="manualBp7y"
             step="0.5"
-            style="width: 55px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; text-align: center"
+            style="width: 55px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; text-align: center"
           />
           <span style="font-size: 11px; color: var(--co-text-3)">bp</span>
           <span style="font-size: 12px; color: var(--co-text-3)">10年期:</span>
@@ -255,7 +257,7 @@
             type="number"
             v-model.number="manualBp10y"
             step="0.5"
-            style="width: 55px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; text-align: center"
+            style="width: 55px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; text-align: center"
           />
           <span style="font-size: 11px; color: var(--co-text-3)">bp</span>
           <n-button size="tiny" type="primary" @click="submitBpOverride">应用</n-button>
@@ -307,7 +309,7 @@
                   :value="calc.testEtfPrices[item.symbol]"
                   @input="onEtfPriceInput(item.symbol, $event)"
                   step="0.01"
-                  style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-accent-text); font-weight: bold; text-align: center; flex-shrink: 0"
+                  style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-accent-text); font-weight: bold; text-align: center; flex-shrink: 0"
                   :data-sym="item.symbol"
                 />
               </div>
@@ -322,18 +324,18 @@
                 :value="calc.targetLofQty.value"
                 @input="onTargetLofQtyInput"
                 step="100"
-                style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; font-weight: bold; text-align: center; color: var(--co-text-2)"
+                style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; font-weight: bold; text-align: center; color: var(--co-text-2)"
               />
               <span style="font-size: 13px; color: var(--co-text-2); white-space: nowrap">股，投入</span>
               <span
-                style="font-size: 14px; color: var(--co-text-2); font-weight: bold; font-family: monospace; white-space: nowrap"
+                style="font-size: 14px; color: var(--co-text-2); font-weight: bold; font-family: var(--co-font-mono); white-space: nowrap"
                 >{{ calc.syncedCapital.value || '-' }}</span
               >
               <span style="font-size: 13px; color: var(--co-text-2); white-space: nowrap"
                 >元，做空 {{ calc.meta.value?.fund_config?.trade_etf }}</span
               >
               <span
-                style="font-size: 14px; color: var(--co-accent-text); font-weight: bold; font-family: monospace; white-space: nowrap"
+                style="font-size: 14px; color: var(--co-accent-text); font-weight: bold; font-family: var(--co-font-mono); white-space: nowrap"
                 >{{ calc.lofQtyEtf.value ? calc.lofQtyEtf.value.etfQty : '-' }}</span
               >
               <span style="font-size: 13px; color: var(--co-text-2); white-space: nowrap">股</span>
@@ -344,7 +346,7 @@
             <div style="width: 160px; flex-shrink: 0; display: flex; align-items: center; gap: 6px">
               <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold; white-space: nowrap">估值:</span>
               <span
-                style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: monospace"
+                style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: var(--co-font-mono)"
                 >{{ calc.etfVal.value > 0 ? calc.etfVal.value.toFixed(4) : '-' }}</span
               >
             </div>
@@ -360,7 +362,7 @@
                   fontSize: '16px',
                   fontWeight: 'bold',
                   color: calc.derivedEtfPremium.value > 0 ? 'var(--co-up)' : 'var(--co-down)',
-                  fontFamily: 'monospace',
+                  fontFamily: 'var(--co-font-mono)',
                 }"
               >
                 {{
@@ -378,13 +380,13 @@
             >
               <span style="font-size: 11px; color: var(--co-text-3); white-space: nowrap"
                 >对冲值:
-                <span style="color: var(--co-accent-text); font-family: monospace">{{
+                <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
                   (calc.meta.value?.base_data?.hedge || 0).toFixed(4)
                 }}</span></span
               >
               <span style="font-size: 11px; color: var(--co-text-3); white-space: nowrap"
                 >敞口:
-                <span style="color: var(--co-accent-text); font-family: monospace">{{
+                <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
                   calc.lofQtyEtf.value ? calc.lofQtyEtf.value.exposure.toFixed(2) : '-'
                 }}元</span></span
               >
@@ -400,7 +402,7 @@
                 <span
                   v-for="(item, idx) in calc.lofQtyEtf.value.breakdown"
                   :key="item.symbol"
-                  style="font-family: monospace; font-weight: bold"
+                  style="font-family: var(--co-font-mono); font-weight: bold"
                   >{{ item.symbol }}={{ item.qty }}股<span v-if="idx < calc.lofQtyEtf.value.breakdown.length - 1">, </span></span
                 >
               </span>
@@ -422,15 +424,15 @@
             </div>
             <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap">
               <span style="font-size: 12px; color: var(--co-text-3)">实时价:</span>
-              <span style="font-family:monospace;font-weight:bold;color:var(--co-down);font-size:14px;">
+              <span style="font-family:var(--co-font-mono);font-weight:bold;color:var(--co-down);font-size:14px;">
                 {{ calc.meta.value?.future_quote?.price ? Number(calc.meta.value.future_quote.price).toFixed(0) : '-' }}
               </span>
               <span style="font-size: 12px; color: var(--co-text-3)">昨结算:</span>
-              <span style="font-family:monospace;font-weight:bold;color:var(--co-down);font-size:14px;">
+              <span style="font-family:var(--co-font-mono);font-weight:bold;color:var(--co-down);font-size:14px;">
                 {{ calc.meta.value?.future_quote?.settlement ? Number(calc.meta.value.future_quote.settlement).toFixed(0) : '-' }}
               </span>
               <span style="font-size: 12px; color: var(--co-text-3)">VWAP:</span>
-              <span style="font-family:monospace;font-weight:bold;color:var(--co-down);font-size:14px;">
+              <span style="font-family:var(--co-font-mono);font-weight:bold;color:var(--co-down);font-size:14px;">
                 {{ calc.meta.value?.future_quote?.vwap ? Number(calc.meta.value.future_quote.vwap).toFixed(0) : '-' }}
               </span>
               <span style="font-size: 11px; color: var(--co-text-3); margin-left: 4px">
@@ -448,18 +450,18 @@
                 :value="calc.simLofPrice.value"
                 @input="onSimLofPriceInput"
                 step="0.001"
-                style="width: 70px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-up); font-weight: bold; text-align: center"
+                style="width: 70px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-up); font-weight: bold; text-align: center"
               />
             </div>
             <div style="width: 140px; flex-shrink: 0; display: flex; align-items: center; gap: 6px">
               <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold">参考估值:</span>
-              <span style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: monospace">
+              <span style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: var(--co-font-mono)">
                 {{ calc.ag0Val.value > 0 ? calc.ag0Val.value.toFixed(4) : '-' }}
               </span>
             </div>
             <div style="width: 140px; flex-shrink: 0; display: flex; align-items: center; gap: 6px">
               <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold">溢价:</span>
-              <span :style="{ fontSize: '16px', fontWeight: 'bold', fontFamily: 'monospace', color: calc.ag0Premium.value > 0 ? 'var(--co-up)' : 'var(--co-down)' }">
+              <span :style="{ fontSize: '16px', fontWeight: 'bold', fontFamily: 'var(--co-font-mono)', color: calc.ag0Premium.value > 0 ? 'var(--co-up)' : 'var(--co-down)' }">
                 {{ calc.ag0Premium.value > 0 ? (calc.ag0Premium.value > 0 ? '+' : '') + calc.ag0Premium.value.toFixed(3) + '%' : '-' }}
               </span>
             </div>
@@ -491,7 +493,7 @@
               :value="calc.testFutPrice.value"
               @input="onFutPriceInput"
               step="0.01"
-              style="width: 75px; padding: 3px; font-size: 14px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-accent-text); font-weight: bold; text-align: center"
+              style="width: 75px; padding: 3px; font-size: 14px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-accent-text); font-weight: bold; text-align: center"
             />
             <span style="color: var(--co-text-2); font-size: 13px; font-weight: bold; margin-left: 4px"
               >校准:</span
@@ -501,7 +503,7 @@
               :value="calc.testFutCalib.value"
               @input="onFutCalibInput"
               step="0.0001"
-              style="width: 60px; padding: 3px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; text-align: center"
+              style="width: 60px; padding: 3px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; text-align: center"
             />
           </div>
 
@@ -513,7 +515,7 @@
           >
             <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold">估值:</span>
             <span
-              style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: monospace; width: 65px; text-align: left"
+              style="font-size: 15px; font-weight: bold; color: var(--co-accent-text); font-family: var(--co-font-mono); width: 65px; text-align: left"
               >{{ calc.futCalibVal.value > 0 ? calc.futCalibVal.value.toFixed(4) : '-' }}</span
             >
             <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold">溢价:</span>
@@ -522,7 +524,7 @@
                 fontSize: '16px',
                 fontWeight: 'bold',
                 color: calc.derivedFutPremium.value > 0 ? 'var(--co-up)' : 'var(--co-down)',
-                fontFamily: 'monospace',
+                fontFamily: 'var(--co-font-mono)',
                 width: '60px',
                 textAlign: 'left',
               }"
@@ -547,11 +549,11 @@
               :value="calc.targetLotsFuture.value"
               @input="onTargetLotsFutureInput"
               step="1"
-              style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; font-weight: bold; text-align: center; color: var(--co-text-2)"
+              style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; font-weight: bold; text-align: center; color: var(--co-text-2)"
             />
             <span style="font-size: 13px; color: var(--co-text-2)">手期货 → 对应LOF</span>
             <span
-              style="font-size: 14px; color: var(--co-up); font-weight: bold; font-family: monospace"
+              style="font-size: 14px; color: var(--co-up); font-weight: bold; font-family: var(--co-font-mono)"
               >{{ calc.lofQtyFuture.value ? calc.lofQtyFuture.value.lofQty : '-' }}</span
             >
             <span style="font-size: 13px; color: var(--co-text-2)">股</span>
@@ -562,19 +564,19 @@
         >
           <span
             >对冲值:
-            <span style="color: var(--co-accent-text); font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               calc.lofQtyFuture.value ? calc.lofQtyFuture.value.hedgeValue.toFixed(4) : '-'
             }}</span></span
           >
           <span
             >敞口:
-            <span style="color: var(--co-accent-text); font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               calc.lofQtyFuture.value ? calc.lofQtyFuture.value.exposure.toFixed(2) : '-'
             }}元</span></span
           >
           <span
             >校准ETF:
-            <span style="color: var(--co-accent-text); font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               calc.equivEtfPrice.value > 0 ? calc.equivEtfPrice.value.toFixed(3) : '-'
             }}</span></span
           >
@@ -601,7 +603,7 @@
               :value="calc.testFutPrice.value"
               @input="onFutPriceInput"
               step="0.01"
-              style="width: 75px; padding: 3px; font-size: 14px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-accent-text); font-weight: bold; text-align: center"
+              style="width: 75px; padding: 3px; font-size: 14px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; color: var(--co-accent-text); font-weight: bold; text-align: center"
             />
           </div>
 
@@ -612,7 +614,7 @@
           >
             <span style="color: var(--co-text-2); font-size: 14px; font-weight: bold">估值:</span>
             <span
-              style="font-size: 15px; font-weight: bold; color: var(--co-text); font-family: monospace; width: 65px; text-align: left"
+              style="font-size: 15px; font-weight: bold; color: var(--co-text); font-family: var(--co-font-mono); width: 65px; text-align: left"
               >{{
                 calc.pureFutVal.value > 0 ? calc.pureFutVal.value.toFixed(4) : '-'
               }}</span
@@ -623,7 +625,7 @@
                 fontSize: '16px',
                 fontWeight: 'bold',
                 color: calc.derivedPureFutPremium.value > 0 ? 'var(--co-up)' : 'var(--co-down)',
-                fontFamily: 'monospace',
+                fontFamily: 'var(--co-font-mono)',
                 width: '60px',
                 textAlign: 'left',
               }"
@@ -647,11 +649,11 @@
               :value="calc.targetLotsPureFuture.value"
               @input="onTargetLotsPureFutureInput"
               step="1"
-              style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: monospace; border: 1px solid var(--co-border); border-radius: 4px; font-weight: bold; text-align: center; color: var(--co-text-2)"
+              style="width: 65px; padding: 2px 4px; font-size: 13px; font-family: var(--co-font-mono); border: 1px solid var(--co-border); border-radius: 4px; font-weight: bold; text-align: center; color: var(--co-text-2)"
             />
             <span style="font-size: 13px; color: var(--co-text-2)">手期货 → 对应LOF</span>
             <span
-              style="font-size: 14px; color: var(--co-up); font-weight: bold; font-family: monospace"
+              style="font-size: 14px; color: var(--co-up); font-weight: bold; font-family: var(--co-font-mono)"
               >{{
                 calc.lofQtyPureFuture.value ? calc.lofQtyPureFuture.value.lofQty : '-'
               }}</span
@@ -664,7 +666,7 @@
         >
           <span
             >对冲值:
-            <span style="color: var(--co-accent-text); font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               calc.lofQtyPureFuture.value
                 ? calc.lofQtyPureFuture.value.hedgeValue.toFixed(4)
                 : '-'
@@ -672,7 +674,7 @@
           >
           <span
             >敞口:
-            <span style="color: var(--co-accent-text); font-family: monospace">{{
+            <span style="color: var(--co-accent-text); font-family: var(--co-font-mono)">{{
               calc.lofQtyPureFuture.value
                 ? calc.lofQtyPureFuture.value.exposure.toFixed(2)
                 : '-'

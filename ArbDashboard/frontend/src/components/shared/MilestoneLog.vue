@@ -39,7 +39,8 @@ defineProps<{
 }
 .m-time {
   color: #94a3b8;
-  font-family: 'Courier New', monospace;
+  /* [AI-2026-10-12 重做 统一字体/表头] 里程碑时间统一引用 mono 字体 token */
+  font-family: var(--co-font-mono);
   min-width: 60px;
 }
 .m-msg.success { color: #16a34a; }

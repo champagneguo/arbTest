@@ -4,8 +4,9 @@
       <template #header>
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
           <div style="display: flex; align-items: center; gap: 12px;">
-            <n-button text size="small" @click="router.push('/dashboard')" style="color: #64748b; padding: 0 4px;">
-              ← 返回主看板
+            <!-- [AI-2026-10-12 重做 返回上一页] 原 router.push('/dashboard') 硬跳主看板，改为返回上一页（从原油穿透进入则回到原油穿透） -->
+            <n-button text size="small" @click="router.back()" style="color: #64748b; padding: 0 4px;">
+              ← 返回上一页
             </n-button>
             <n-icon size="20" color="#2563eb"><PieChart /></n-icon>
             <span style="font-size: 16px; font-weight: bold;">季报持仓分析</span>
@@ -1246,7 +1247,8 @@ const holdingSummary = (pageData: any[]) => {
 const holdingColumns: DataTableColumns<any> = [
   { title: '序号', key: 'display_order', width: 50, align: 'center' },
   { title: '代码', key: 'symbol', width: 80, align: 'center', render(row: any) {
-    return h('span', { style: 'font-family: monospace; font-weight: 600;' }, row.symbol || '-')
+    // [AI-2026-10-12 重做 字体统一token] 裸 monospace 字体 → var(--co-font-mono)
+    return h('span', { style: 'font-family: var(--co-font-mono); font-weight: 600;' }, row.symbol || '-')
   }},
   { title: '名称', key: 'name', ellipsis: { tooltip: true } },
   { title: '地区', key: 'region', width: 80, align: 'center', render(row: any) {
@@ -1574,9 +1576,10 @@ onMounted(() => {
   text-align: right;
   font-weight: 600;
   font-size: 11px;
-  color: #64748b;
+  /* [AI-2026-10-12 重做 表头统一蓝底/文字] 文字 #64748b→#33629c、背景 #f6f8fa→#edf3fb（padding 6px 10px 不动） */
+  color: #33629c;
   padding: 6px 10px;
-  background: #f6f8fa;
+  background: #edf3fb;
   border-bottom: 1px solid #e8eaed;
   border-right: 1px solid #eef1f4;
   white-space: nowrap;

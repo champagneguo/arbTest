@@ -44,27 +44,23 @@ UA = (
 
 # 标的配置：symbol -> (source, remote_code)
 # source: "sina"=新浪美股日K, "tx"=腾讯日K
+# [AI-2026-10-11 东哥拍板] **收敛为东京 VPS 未覆盖的 7 只**（原 21 只）。
+#   剔除 14 只 = USO/OILK/BNO/DBO + XOP/GLD/INDA/QQQ/SPY/XBI/VGT/XLE/XLY/KWEB
+#     —— 它们已在东京 VPS `US_ETFIndex_sina.py`（07:00，48 只清单）采集，本 sampler 再采即**重复**。
+#   ARM 侧通路本就存在：ARM `arb-dashboard.service`（`ARB_MORNING_REFRESH_AT=08:00`）的
+#     `--refresh-morning → _run_pipeline → step5` 会**自己从东京 VPS 拉 `usa_prices_*.json` 写 ARM 库**
+#     ⇒ 时序 07:00(VPS) → 07:30(本 sampler 采 7 只) → 08:00(ARM 拉 VPS 48 只) ⇒ 08:00 后 ARM 库齐全。
+#   保留 7 只均为 VPS 清单所无（逐只比对核实）：
+#     · 原油伦敦/港股上市：CRUD、BRNT、03175
+#     · 白银 SLV（VPS 48 只清单中无 SLV；`arbcore/calculators/static_valuation.py:98 base_syms` 用到）
+#     · 瑞士/日本上市：OILUSA、1671、1699
 SOURCES = {
-    # 原油 LOF 直接持仓
+    # 原油 LOF 直接持仓（伦敦/港股上市，VPS 未覆盖）
     "CRUD": ("tx", "ukCRUD"),
     "BRNT": ("tx", "ukBRNT"),
-    "USO": ("sina", "USO"),
-    "OILK": ("sina", "OILK"),
-    "BNO": ("sina", "BNO"),
-    "DBO": ("sina", "DBO"),
     "03175": ("tx", "hk03175"),
-    # 常用 QDII / 对冲标的
-    "XOP": ("sina", "XOP"),
-    "GLD": ("sina", "GLD"),
+    # 白银 ETF（VPS 48 只清单中无 SLV）
     "SLV": ("sina", "SLV"),
-    "INDA": ("sina", "INDA"),
-    "QQQ": ("sina", "QQQ"),
-    "SPY": ("sina", "SPY"),
-    "XBI": ("sina", "XBI"),
-    "VGT": ("sina", "VGT"),
-    "XLE": ("sina", "XLE"),
-    "XLY": ("sina", "XLY"),
-    "KWEB": ("sina", "KWEB"),
     # 瑞士/日本上市（SIX 官方 CSV / 雅虎日本，2026-09-26 接入，替代手动补）
     "OILUSA": ("six", "CH0109967858USD4"),
     "1671": ("jp", "1671.T"),

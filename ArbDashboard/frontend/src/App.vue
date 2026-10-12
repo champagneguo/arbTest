@@ -48,19 +48,31 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => ({
     cardColor: '#ffffff',
     tableColor: '#ffffff',
     textColorBase: '#1f2328',
-    borderColor: '#ebedf0'
+    borderColor: '#ebedf0',
+    // [AI-2026-10-12 重做 统一字体/表头] Naive UI 全局字体接入双字体栈：fontFamily 写与 --co-font-sans 完全一致的
+    // 字面栈（Naive 把主题值注入内联 CSS 变量，嵌套 var() 风险高，故不写 var()）；fontSize 统一 13px。
+    fontFamily: 'v-sans, "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", system-ui, -apple-system, "Segoe UI", Arial, sans-serif',
+    fontSize: '13px'
   },
   DataTable: {
     thFontWeight: '700',
-    thColor: '#f6f7f9',
-    thColorHover: '#eef0f2',
+    // [AI-2026-10-12 重做 统一字体/表头] 表头三色统一到参照表 RtHoldingTable 口径：底 #edf3fb / 字 #33629c / 悬停 #e2edf9，
+    // 其余键（td 色、border、fontWeight）保持原样不动。
+    thColor: '#edf3fb',
+    thColorHover: '#e2edf9',
     tdColor: '#ffffff',
     tdColorHover: '#f6f7f9',
     tdColorStriped: '#fbfcfd',
     tdColorHoverStriped: '#f6f7f9',
     borderColor: '#ebedf0',
-    thTextColor: '#1f2328',
+    thTextColor: '#33629c',
     tdTextColor: '#1f2328'
+  },
+  // [AI-2026-10-12 重做 统一字体/表头] 新增 Table 主题表头色：覆盖 <n-table>（如 HoldingAnalysis 5 处），
+  // 当前回退 naive 默认 #fafafc，此处全局统一为 #edf3fb/#33629c。
+  Table: {
+    thColor: '#edf3fb',
+    thTextColor: '#33629c'
   },
   Card: {
     borderRadius: '8px'
@@ -109,8 +121,10 @@ provide('themeColor', primaryColor)
   /* [AI-2026-10-09 东哥拍板] 删除 --co-rt-bg/head、--co-static-bg/head、--co-si-bg/head：
      三组「估值列整列底色」的 CSS 已随之从 Dashboard.vue 移除（残留意图见该文件注释），
      六个变量引用归零 ⇒ 一并删掉，避免留下没人用的调色板。 */
-  --co-font-sans: 'Inter', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --co-font-mono: 'Fira Code', ui-monospace, SFMono-Regular, Consolas, monospace;
+  /* [AI-2026-10-12 重做 统一字体/表头] 全站唯一字体真相源（两套栈）：sans=v-sans(UI 文本)/mono=v-mono(代码数字)，
+     中文均经 "Microsoft YaHei UI"/"PingFang SC" 回退。所有组件 font-family 一律 var(--co-font-sans) / var(--co-font-mono)。 */
+  --co-font-sans: v-sans, "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+  --co-font-mono: v-mono, "Microsoft YaHei UI", "PingFang SC", Consolas, "Courier New", monospace;
   --co-radius: 8px;
   --co-radius-sm: 6px;
   --co-fs-title: 14px;
@@ -123,7 +137,8 @@ provide('themeColor', primaryColor)
 body {
   margin: 0;
   padding: 0;
-  font-family: Inter, "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", v-sans, Arial, sans-serif;
+  /* [AI-2026-10-12 重做 统一字体/表头] body 字体统一引用单一真相源 token（font-size 13px 保持不变） */
+  font-family: var(--co-font-sans);
   background-color: var(--bg-color);
   color: var(--text-main);
   font-size: 13px;

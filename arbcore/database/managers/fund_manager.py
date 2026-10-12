@@ -144,26 +144,30 @@ class FundManager(BaseManager):
         }
 
     def sync_unified_fund_list(self, fund_list: List[Dict[str, Any]]):
+        """[AI-2026-10-11] DB 权威化：YAML 降级为「种子 / 备用快照」。
+
+        旧实现有两个与「一切以 DB 为准」相悖的动作，本方法已改掉：
+          1) `ON CONFLICT DO UPDATE` —— 会用 YAML 覆盖 DB 已有行
+             （后果：DB 里改过的 category/related_index 会被 YAML 还原）；
+          2) `DELETE ... WHERE fund_code NOT IN (yaml_codes)` —— 会删除 DB 里
+             不在 YAML 的行（后果：只写 DB 的基金被清掉）。
+        而 main.py lifespan（`sys.platform != 'win32'` 分支）在 ARM 启动时会调用本方法
+        ⇒ 上述两动作必被触发。故改为「只补缺、不覆盖、不删除」。
+
+        新语义：仅把 YAML 中 DB 尚不存在的基金 INSERT 进来（种子），
+        已存在的行一律保持 DB 原值；删基金须显式操作 DB。
+        主键 = fund_code。
+        """
         with self.lock:
             try:
                 conn = self._get_conn()
+                seeded = 0
                 for item in fund_list:
-                    # [AI-2026-08-06] 改用 ON CONFLICT DO UPDATE 而非 INSERT OR REPLACE：
-                    #   INSERT OR REPLACE 会整行删除旧记录再用默认值重插，导致未同步列被静默清零。
-                    #   现仅在冲突时更新同步字段，保留表中既有未同步列（如已废弃的 paused_exempt）不被 sync 冲掉。
-                    #   主键 = fund_code。
-                    conn.execute('''
+                    cur = conn.execute('''
                         INSERT INTO unified_fund_list
-                        (category, fund_code, fund_name, related_index, idx_code, idx_name, pos_ratio, target_type)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(fund_code) DO UPDATE SET
-                            category=excluded.category,
-                            fund_name=excluded.fund_name,
-                            related_index=excluded.related_index,
-                            idx_code=excluded.idx_code,
-                            idx_name=excluded.idx_name,
-                            pos_ratio=excluded.pos_ratio,
-                            target_type=excluded.target_type
+                        (category, fund_code, fund_name, related_index, idx_code, idx_name, pos_ratio, target_type, data_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(fund_code) DO NOTHING
                     ''', (
                         item['category'],
                         item['code'],
@@ -172,15 +176,12 @@ class FundManager(BaseManager):
                         item.get('idx_code', item.get('related_index', '-')),
                         item.get('idx_name', '-'),
                         item.get('pos_ratio', 0.95),
-                        item.get('target_type', 'ETF')
+                        item.get('target_type', 'ETF'),
+                        item.get('data_source', '') or ''
                     ))
-                # [AI-2026-07-23] 删除 YAML 中已不存在的基金记录（防止残留导致 HSI 等指数继续被抓取)
-                yaml_codes = [item['code'] for item in fund_list]
-                if yaml_codes:
-                    placeholders = ','.join(['?'] * len(yaml_codes))
-                    conn.execute(f"DELETE FROM unified_fund_list WHERE fund_code NOT IN ({placeholders})", yaml_codes)
+                    seeded += cur.rowcount
                 conn.commit()
-                logger.info(f"Successfully synced {len(fund_list)} unified items to database.")
+                logger.info(f"[DB权威] unified_fund_list 种子同步：YAML {len(fund_list)} 只，新补 {seeded} 只（不覆盖/不删除）")
             except Exception as e:
                 logger.error(f"Failed to sync unified fund list: {e}")
             finally:
@@ -188,8 +189,8 @@ class FundManager(BaseManager):
 
     def get_unified_fund_list(self) -> List[Dict[str, Any]]:
         conn = self._get_conn()
-        cursor = conn.execute("SELECT category, fund_code, fund_name, related_index, pos_ratio, target_type FROM unified_fund_list")
-        results = [{"category": r[0], "code": r[1], "name": r[2], "related_index": r[3], "pos_ratio": r[4], "target_type": r[5]} for r in cursor.fetchall()]
+        cursor = conn.execute("SELECT category, fund_code, fund_name, related_index, pos_ratio, target_type, data_source FROM unified_fund_list")
+        results = [{"category": r[0], "code": r[1], "name": r[2], "related_index": r[3], "pos_ratio": r[4], "target_type": r[5], "data_source": r[6]} for r in cursor.fetchall()]
         conn.close()
         return results
 

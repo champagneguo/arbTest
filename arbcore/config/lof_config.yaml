@@ -606,7 +606,7 @@ funds:
     - FUTU
 - code: '513350'
   name: 富国标普石油
-  category: QDII欧美
+  category: 黄金原油
   trade_etf: XOP
   trade_future: ''
   holdings:
@@ -643,7 +643,7 @@ funds:
     - FUTU
 - code: '159518'
   name: 嘉实标普石油
-  category: QDII欧美
+  category: 黄金原油
   trade_etf: XOP
   trade_future: ''
   holdings:
@@ -680,7 +680,7 @@ funds:
     - FUTU
 - code: '162411'
   name: 华宝油气
-  category: QDII欧美
+  category: 黄金原油
   valuation_method: etf
   trade_etf: XOP
   trade_broker: tdx
@@ -899,6 +899,566 @@ funds:
   valuation_method: index
   woody_supported: true
   data_source: woody
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '513500'
+  name: 标普500ETF博时
+  category: QDII欧美
+  trade_etf: SPY
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: SPY
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.INX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .INX
+  static_valuation:
+    basis: index
+    symbol: .INX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: SPY
+    source_priority:
+    - IB
+    - FUTU
+- code: '513650'
+  name: 标普500ETF南方
+  category: QDII欧美
+  trade_etf: SPY
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: SPY
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.INX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .INX
+  static_valuation:
+    basis: index
+    symbol: .INX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: SPY
+    source_priority:
+    - IB
+    - FUTU
+- code: '159612'
+  name: 标普500ETF国泰
+  category: QDII欧美
+  trade_etf: SPY
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: SPY
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.INX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .INX
+  static_valuation:
+    basis: index
+    symbol: .INX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: SPY
+    source_priority:
+    - IB
+    - FUTU
+- code: '159655'
+  name: 标普500ETF华夏
+  category: QDII欧美
+  trade_etf: SPY
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: SPY
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.INX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .INX
+  static_valuation:
+    basis: index
+    symbol: .INX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: SPY
+    source_priority:
+    - IB
+    - FUTU
+- code: '513100'
+  name: 纳指ETF国泰
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '513110'
+  name: 纳指ETF华泰柏瑞
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '513390'
+  name: 纳指100ETF博时
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '513870'
+  name: 纳指ETF富国
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159501'
+  name: 纳指ETF嘉实
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159513'
+  name: 纳斯达克100ETF大成
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159632'
+  name: 纳斯达克ETF华安
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159659'
+  name: 纳斯达克100ETF招商
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159660'
+  name: 纳指ETF汇添富
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159696'
+  name: 纳指ETF易方达
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '159941'
+  name: 纳指ETF广发
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
+  related_index: .NDX
+  static_valuation:
+    basis: index
+    symbol: .NDX
+    source_priority:
+    - sina
+  dynamic_valuation:
+    basis: etf_realtime
+    symbol: QQQ
+    source_priority:
+    - IB
+    - FUTU
+- code: '513300'
+  name: 纳斯达克ETF华夏
+  category: QDII欧美
+  trade_etf: QQQ
+  trade_future: ''
+  holdings:
+    equity_ratio: 100.0
+    cash_ratio: 0.0
+  valuation_portfolio:
+  - symbol: QQQ
+    weight: 100.0
+    anchor: US
+    name: 美股收盘
+    currency: USD
+    exchange: SMART
+  sina_index_url: https://stock.finance.sina.com.cn/usstock/quotes/.NDX.html
+  holdings_portfolio: []
+  future_hedging: []
+  position: 100.0
+  sub_category: 指数
+  valuation_method: index
+  woody_supported: false
+  data_source: self
   related_index: .NDX
   static_valuation:
     basis: index
@@ -1223,7 +1783,7 @@ funds:
     - FUTU
 - code: '161226'
   name: 国瑞白银期货
-  category: 白银
+  category: 商品
   trade_etf: ''
   trade_future: AG0
   holdings:
@@ -1379,6 +1939,8 @@ funds:
   name: 日本东证指数ETF南方
   category: QDII日本
   rate_type: spot
+  related_index: TOPIX
+  pos_ratio: 0.95
   data_source: woody
   trade_etf: ''
   trade_future: ''

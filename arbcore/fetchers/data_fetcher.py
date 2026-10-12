@@ -6,6 +6,7 @@ import time
 import re
 import sys
 import os
+import json
 
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,8 +33,16 @@ logger = logging.getLogger(__name__)
 
 
 class DataFetcher:
-    """数据获取器，用于从各种来源获取数据"""
-    
+    """数据获取器，用于从各种来源获取数据
+
+    [AI-2026-10-11 分工铁律 · 东哥拍板] 静态/历史数据采集全部由**东京 VPS** 承担
+    （本机/ARM 只负责实时行情 + 估值计算）。本类中「直连外网采历史」的 4 个方法
+    （fetch_lof_nav_data / fetch_lof_price_data / fetch_index_data /
+    fetch_sina_us_stock_historical_data / fetch_sina_hk_stock_historical_data）
+    已是死代码（零 caller），VPS 化后自然废弃，已**禁用**（调用即抛错，不直连采历史）。
+    仍保留的合法直连：汇率中间价/在岸价（VPS fx 文件不含，本机兜底）+ 期货结算缺失兜底。
+    """
+
     def __init__(self):
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -167,11 +176,71 @@ class DataFetcher:
             logger.warning("🚨 [SZSE] 触发全局熔断机制！本次运行后续所有深市基金将不再尝试深交所API。")
         return None
 
+    def _fetch_fx_from_vps(self):
+        """[AI-2026-10-11 分工铁律] 从东京 VPS 拉「当日官方中间价」(fx_*.json，由 woodyAPI_sinafuture_fx.py @09:20 产)。
+        返回与 fetch_official_exchange_rate 同结构的 dict（人民币中间价 key），失败/无当日文件返回 None。
+        单一真相源：中间价由 VPS 供数（东哥 08-17 铁律），本机不再常态直连 chinamoney。"""
+        try:
+            import paramiko
+            from arbcore.config import account_private as ap
+        except Exception as e:
+            logger.info(f"[VPS-fx] paramiko/account_private 不可用({e})，走本机直连兜底")
+            return None
+        if not getattr(ap, 'VPS_HOST', None) or not getattr(ap, 'VPS_USER', None):
+            return None
+        key_path = getattr(ap, 'VPS_KEY_PATH', None)
+        key_pass = getattr(ap, 'VPS_KEY_PASSWORD', None)
+        password = getattr(ap, 'VPS_PASSWORD', None)
+        port = getattr(ap, 'VPS_PORT', 22)
+        data_dir = getattr(ap, 'VPS_DATA_DIR', '/root/ArbSiphon/data')
+        if not (key_path and os.path.exists(key_path)) and not password:
+            return None
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            if key_path and os.path.exists(key_path):
+                pkey = paramiko.Ed25519Key.from_private_key_file(key_path, password=key_pass)
+                ssh.connect(ap.VPS_HOST, port=port, username=ap.VPS_USER, pkey=pkey, timeout=10)
+            else:
+                ssh.connect(ap.VPS_HOST, port=port, username=ap.VPS_USER, password=password,
+                            timeout=10, look_for_keys=False, allow_agent=False)
+            sftp = ssh.open_sftp()
+            remote = f"{data_dir}/fx_{today_str}.json"
+            with sftp.open(remote, 'rb') as fh:
+                content = json.loads(fh.read().decode('utf-8'))
+            sftp.close()
+            usd = content.get('usd_cny_mid')
+            if not usd:
+                return None
+            return {
+                '日期': content.get('date', today_str),
+                '人民币中间价': usd,
+                'usd_cny_mid': usd,
+                'hkd_cny_mid': content.get('hkd_cny_mid'),
+                'jpy_cny_mid': content.get('jpy_cny_mid'),
+                'eur_cny_mid': content.get('eur_cny_mid'),
+                '来源': '东京VPS fx (woodyAPI_sinafuture_fx @09:20)',
+            }
+        except Exception as e:
+            logger.info(f"[VPS-fx] 拉取当日 fx_*.json 失败({e})，走本机直连兜底")
+            return None
+        finally:
+            ssh.close()
+
     def fetch_official_exchange_rate(self, date=None):
-        """从国家外汇管理局获取指定日期的人民币中间价，失败时回退到Woody网页"""
-        logger.info("从国家外汇管理局获取人民币中间价")
-        
-        # 1. 尝试从国家外汇管理局获取
+        """[AI-2026-10-11 分工铁律·东哥拍板 A] 官方中间价 VPS-first。
+        ① 先拉东京 VPS 当日 fx_*.json（woodyAPI_sinafuture_fx.py @09:20 产的中间价，单一真相源）；
+        ② 取不到（VPS 当日缺失 / 断网）才兜底直连国家外汇管理局 chinamoney（罕见，非常态）。
+        在岸价(spot)仍由本机/ARM 直连新浪（VPS 不采在岸价，见 093_1 §5.3）。"""
+        # 0. VPS-first：拉东京 VPS 当日中间价（单源，避免本机常态直连采历史）
+        vps_rates = self._fetch_fx_from_vps()
+        if vps_rates:
+            logger.info(f"[VPS-fx] 中间价取自东京 VPS（当日 fx 文件）: USD={vps_rates.get('usd_cny_mid')}")
+            return vps_rates
+
+        # 1. 兜底：本机直连国家外汇管理局（仅当 VPS 当日中间价缺失时触发）
+        logger.info("VPS 当日中间价缺失，兜底直连国家外汇管理局获取人民币中间价")
         url = "https://www.chinamoney.com.cn/r/cms/www/chinamoney/data/fx/ccpr.json"
         try:
             response = requests.get(url, headers=self.headers, proxies={}, timeout=30, verify=False)
@@ -591,16 +660,16 @@ class DataFetcher:
         return None
 
     def fetch_lof_nav_data(self, fund_code, existing_data=None):
-        """从东财获取LOF基金历史净值数据
-        
-        Args:
-            fund_code: LOF基金代码
-            existing_data: 现有的数据，用于检查是否需要爬取
-        
-        Returns:
-            dict: 包含日期和净值的字典
+        """[AI-2026-10-11 禁用] 从东财获取LOF基金历史净值数据。
+
+        ⛔ 分工铁律（东哥拍板）：静态/历史净值采集已由**东京 VPS** LOFETF_pricenav_tx-em.py
+        （净值段，03:00）承担，本机不再直连东财采历史。本方法已是死代码（零 caller），
+        保留签名仅为可回退；调用即抛错。历史净值请走 VPS SFTP 同步（step5 拉 nav_*.json）。
         """
-        logger.info(f"从东财获取LOF基金 {fund_code} 历史净值数据")
+        raise RuntimeError(
+            f"[铁律] fetch_lof_nav_data({fund_code}) 已禁用：历史净值改由东京 VPS 采集，"
+            f"本机 daily_updater 经 SFTP 拉取 nav_{{date}}.json，不再直连东财。"
+        )
         
         # 检查是否需要爬取
         if existing_data is not None:
@@ -655,16 +724,16 @@ class DataFetcher:
         return nav_dict
     
     def fetch_lof_price_data(self, fund_code, existing_data=None):
-        """从新浪获取LOF基金历史收盘价格数据
-        
-        Args:
-            fund_code: LOF基金代码
-            existing_data: 现有的数据，用于检查是否需要爬取
-        
-        Returns:
-            DataFrame: 包含LOF基金历史数据的DataFrame
+        """[AI-2026-10-11 禁用] 从新浪获取LOF基金历史收盘价格数据。
+
+        ⛔ 分工铁律（东哥拍板）：历史收盘价已由**东京 VPS** LOFETF_pricenav_tx-em.py
+        （收盘价段，03:00）承担，本机不再直连新浪/腾讯采历史。死代码（零 caller），
+        保留签名仅为可回退；调用即抛错。历史价请走 VPS SFTP 同步（拉 prices_*.json）。
         """
-        logger.info(f"从新浪获取LOF基金 {fund_code} 历史收盘价格数据")
+        raise RuntimeError(
+            f"[铁律] fetch_lof_price_data({fund_code}) 已禁用：历史价改由东京 VPS 采集，"
+            f"本机 daily_updater 经 SFTP 拉取 prices_{{date}}.json，不再直连新浪/腾讯。"
+        )
         
         # 检查是否需要爬取
         if existing_data is not None:
@@ -785,15 +854,16 @@ class DataFetcher:
             return None
     
     def fetch_index_data(self, indices=None):
-        """从新浪获取指数数据
-        
-        Args:
-            indices: 指数列表，默认为['.INX', '.NDX']
-        
-        Returns:
-            dict: 包含指数数据的字典
+        """[AI-2026-10-11 禁用] 从新浪获取指数数据。
+
+        ⛔ 分工铁律（东哥拍板）：多市场指数收盘（N225/TOPIX/DAX/CAC/HSCEI）已由**东京 VPS**
+        （index_JPX_EU_yahoo.py N225/TOPIX/DAX/CAC + hk_index_fetch.py HSCEI @16:30）承担，本机不再直连新浪采指数。
+        死代码（零 caller），保留签名仅为可回退；调用即抛错。指数请走 VPS SFTP 同步（index_*）。
         """
-        logger.info("从新浪获取指数数据")
+        raise RuntimeError(
+            f"[铁律] fetch_index_data({indices}) 已禁用：指数收盘改由东京 VPS 采集，"
+            f"本机 daily_updater step5b 经 SFTP 拉取 index_{{SYM}}.json，不再直连新浪。"
+        )
         
         if indices is None:
             indices = ['.INX', '.NDX']
@@ -936,8 +1006,16 @@ class DataFetcher:
         return futures_data
     
     def fetch_sina_us_stock_historical_data(self, symbol, start_date, end_date):
-        """从新浪美股API获取标准ETF和指数历史数据"""
-        logger.info(f"从新浪获取美股历史数据: {symbol}")
+        """[AI-2026-10-11 禁用] 从新浪美股API获取标准ETF和指数历史数据。
+
+        ⛔ 分工铁律（东哥拍板）：美股 ETF 价格/净值已由**东京 VPS**（US_XOP5_NAV_yahooinvesco.py @07:30
+        采 NAV、US_ETFIndex_sina.py @07:00 采价格）承担，本机不再直连新浪采历史。
+        死代码（零 caller），保留签名仅为可回退；调用即抛错。请走 VPS SFTP 同步（usa_prices_* / etf_nav_*）。
+        """
+        raise RuntimeError(
+            f"[铁律] fetch_sina_us_stock_historical_data({symbol}) 已禁用：美股历史改由东京 VPS 采集，"
+            f"本机经 SFTP 拉取 usa_prices_{{date}}.json / etf_nav_{{date}}.json，不再直连新浪。"
+        )
         
         # 兼容处理：确保指数符号以点开头且为小写 (如 .inx)
         symbol_lower = str(symbol).lower()
@@ -998,8 +1076,16 @@ class DataFetcher:
         return None
     
     def fetch_sina_hk_stock_historical_data(self, symbol, start_date, end_date):
-        """从腾讯港股API获取港股历史数据"""
-        logger.info(f"从腾讯获取港股历史数据: {symbol}")
+        """[AI-2026-10-11 禁用] 从腾讯港股API获取港股历史数据。
+
+        ⛔ 分工铁律（东哥拍板）：港股指数收盘（HSCEI）已由**东京 VPS** hk_index_fetch.py @16:30
+        承担，本机不再直连腾讯采港股历史。死代码（零 caller），保留签名仅为可回退；
+        调用即抛错。请走 VPS SFTP 同步（index_HSCEI_*.json）。
+        """
+        raise RuntimeError(
+            f"[铁律] fetch_sina_hk_stock_historical_data({symbol}) 已禁用：港股历史改由东京 VPS"
+            f" hk_index_fetch.py 采集，本机经 SFTP 拉取 index_HSCEI_{{date}}.json，不再直连腾讯。"
+        )
 
         url = f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?_var=kline_dayqfq&param=hk{symbol},day,,,320,qfq&r=0.1"
 

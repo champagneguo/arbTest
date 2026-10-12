@@ -358,6 +358,11 @@ def _is_script_running(script_name: str) -> bool:
                  "Get-CimInstance Win32_Process | "
                  "Select-Object -ExpandProperty CommandLine"],
                 text=True,
+                # [AI-2026-10-11] 根治 EReader 幻影：text=True 按 GBK 解码 PowerShell 大输出时
+                # 偶发 UnicodeDecodeError，在 subprocess 的 _readerthread 线程抛出（线程名恰好含
+                # `_readerthread`），被 ib_reader 的线程异常钩子误判为 IB 协议杂音并误触发断连。
+                # errors='replace' 使解码永不失败，本调用只用于进程名匹配，替换字符不影响匹配。
+                errors="replace",
                 stderr=subprocess.DEVNULL,
                 timeout=5,
             )
@@ -425,6 +430,27 @@ async def lifespan(app: FastAPI):
                 except Exception as e:
                     logger.error(f"❌ [Cloud] YAML→DB 同步失败: {e}")
                 return
+
+            # [AI-2026-10-11 东哥拍板] 非交易日（周末/法定假期）**不起 011 子进程**。
+            # 背景：启动即跑 011 是「后端一重启就拉一次数据」的入口，但它原先**不看交易日**；
+            #   而 daily_updater.run() 的默认分支原会在周末跑一套轻量采集 ⇒ 周日重启后端
+            #   就会空跑 + 触发「VPS 今日无数据」噪音。
+            #   daily_updater.run() 侧已加同样的交易日门控（双保险）；这里提前拦掉，
+            #   连子进程与日志文件都不产生。判据与 daily_updater 同口径
+            #   （arbcore.utils.market_calendar.is_trading_day，日历不可用时退回周末判断）。
+            try:
+                from arbcore.utils.market_calendar import is_trading_day as _is_td_011
+                _now_011 = datetime.now()
+                try:
+                    _td_011 = _is_td_011('A_SHARE', _now_011.date())
+                except Exception:
+                    _td_011 = _now_011.weekday() < 5
+                if not _td_011:
+                    logger.info(f"📅 [{_now_011.strftime('%Y-%m-%d')}] 非A股交易日，跳过启动时 011 数据更新")
+                    system_status.add_milestone("INFO", "非交易日，跳过 011 数据更新")
+                    return
+            except Exception as _e_011:
+                logger.warning(f"011 交易日门控不可用({_e_011})，按原样启动")
 
             logger.info("📊 启动时自动运行 011 数据更新任务...")
             system_status.add_milestone("INFO", "启动时自动运行 011 数据更新")
@@ -702,9 +728,16 @@ async def lifespan(app: FastAPI):
 
         async def _after_hours_close_price_loop():
             """[AI-2026-08-20] 盘后收盘价兜底：15:00后每天自动写今天官方收盘。
-            使用DB检查保证幂等（重启/崩溃不重复写）；子进程异步执行不阻塞事件循环。"""
+            使用DB检查保证幂等（重启/崩溃不重复写）；子进程异步执行不阻塞事件循环。
+
+            [AI-2026-10-11 方案A·东哥拍板] 两条节流：
+              ① 轮询间隔 30s → **300s**（盘后收盘价不需要 30s 级敏捷度）；
+              ② 新增进程内 `_ah_done` 记忆：**一旦拉齐当天就不再查 DB**（跨天自动失效）。
+            效果：DB 查询从「一天约 2880 次」降到「拉齐前每 5 分钟 1 次、拉齐后 0 次」。
+            """
+            _ah_done = set()   # [方案A] 已完成日期（进程内）；进程重启后重查一次，无害
             while True:
-                await asyncio.sleep(30)
+                await asyncio.sleep(300)   # [AI-2026-10-11 方案A] 30s → 300s
                 _n = _dt.now()
                 if _n.weekday() in (5, 6) or _n.hour < 15:
                     continue
@@ -716,6 +749,8 @@ async def lifespan(app: FastAPI):
                     continue
                 # 幂等检查：DB中今天是否已有收盘价？
                 _today = _n.strftime('%Y-%m-%d')
+                if _today in _ah_done:      # [方案A] 当天已拉齐 → 不再查 DB、不再起子进程
+                    continue
                 try:
                     # [AI-2026-09-02] DB 查询放线程，避免阻塞事件循环
                     # [AI-2026-10-09 方案B] 返回 (covered, expected) 覆盖率二元组
@@ -724,6 +759,7 @@ async def lifespan(app: FastAPI):
                     logger.error(f"[AFTER_HOURS] DB检查失败: {_e}")
                     continue
                 if _expected > 0 and _covered >= _expected:
+                    _ah_done.add(_today)    # [方案A] 已拉齐 → 记入，当天不再查
                     continue  # 覆盖率已齐（余下均为真·无日K线），跳过
                 # 未齐（含镜像行冒充场景）→ 异步子进程触发写入（不阻塞 uvicorn 事件循环）
                 try:
@@ -1819,44 +1855,24 @@ def get_fund_valuation_meta(code: str):
         return {"status": "error", "message": str(e)}
 
 
-# --- 国开债BP数据接口 (511520估值校准) ---
+# --- 债券/货币 ETF（现金管理）接口 —— [AI-2026-10-11 东哥拍板] 整组停用 ---
+# 债券/货币 ETF（511880/511990/511360/511520）估值**已于 2026-09-18 迁至 ETFarb**
+# （`ETFarb/src/core/bond_etf_valuation.py`）。LOFarb「现金管理」分类已空、这些接口无消费者
+# ⇒ 保留**路径外壳**（避免前端误调 404），函数体直接回明确提示，不再引用已归档模块。
+# 原实现见 `_deprecated/bond_etf_valuation.py`。
+_BOND_MOVED = {"status": "moved",
+               "message": "债券/货币 ETF（现金管理）估值已迁至 ETFarb（2026-09-18），LOFarb 侧接口停用"}
+
+
 @app.get("/api/bond/bp-data")
 async def get_bp_data(date: str = None):
-    """获取国开债BP数据"""
-    try:
-        bv = get_bond_etf_valuation(fund_service.db, market_data_service)
-        if date:
-            data = bv.get_bp_data(date)
-            return {"status": "ok", "data": data}
-        else:
-            data = bv.get_recent_bp_data(days=10)
-            return {"status": "ok", "data": data}
-    except Exception as e:
-        logger.error(f"获取BP数据失败: {e}")
-        return {"status": "error", "message": str(e)}
+    """[已停用] 国开债 BP 数据 → 见 ETFarb"""
+    return _BOND_MOVED
 
 @app.post("/api/bond/bp-data")
 async def save_bp_data(request: Request):
-    """保存国开债BP数据（手动输入）"""
-    try:
-        data = await request.json()
-        date = data.get('date')
-        if not date:
-            return {"status": "error", "message": "日期不能为空"}
-        
-        bv = get_bond_etf_valuation(fund_service.db, market_data_service)
-        success = bv.save_bp_data(
-            date=date,
-            cdb_7y_bp=data.get('cdb_7y_bp'),
-            cdb_10y_bp=data.get('cdb_10y_bp'),
-            treasury_7y_bp=data.get('treasury_7y_bp'),
-            treasury_10y_bp=data.get('treasury_10y_bp'),
-            note=data.get('note')
-        )
-        return {"status": "ok" if success else "error"}
-    except Exception as e:
-        logger.error(f"保存BP数据失败: {e}")
-        return {"status": "error", "message": str(e)}
+    """[已停用] 保存国开债 BP 数据 → 见 ETFarb"""
+    return _BOND_MOVED
 
 
 # --- Core Fund Configuration (YAML) APIs ---
@@ -2020,7 +2036,9 @@ async def update_ib_core_symbols(request: Request):
 
 # --- [AI-2026-07-07] App-level toggle settings ---
 # 全部分类（快照服务遍历用；分类级暂停功能已于 2026-09-23 完整删除，见 docs/013_7）
-ALL_CATEGORIES = ["黄金原油", "QDII欧美", "QDII日本", "白银", "QDII亚洲", "国内LOF", "现金管理"]
+# [AI-2026-10-11 东哥拍板] 收敛为 LOFarb **实有的 4 类**（原含已废弃的 QDII亚洲/国内LOF/现金管理，
+#   会在启动日志刷「跳过空分类(无成员基金)」噪音）。新增分类时请同步 dashboard_snapshot_service.py。
+ALL_CATEGORIES = ["黄金原油", "QDII欧美", "QDII日本", "商品"]
 
 # [AI-2026-07-07] 回补缺失指数历史
 # [AI-2026-10-10] Private export 端点已剥离至 LOFTrader（/api/private/status + /api/private/export/{code} 移除）
@@ -2866,45 +2884,21 @@ async def smart_monitor_update_target(request: Request):
 #        后端 trading_router.py:946+ 有完整实现）。
 #   留着只会让本机多一个常驻线程 + 一条启动噪音，且给人「LOFarb 还管幽灵模拟器」的错觉。
 
-# --- Bond ETF BP Override API ---
+# --- Bond ETF BP Override API —— [AI-2026-10-11 东哥拍板] 整组停用（同 _BOND_MOVED，见上） ---
 @app.post("/api/bond/bp-override")
 async def set_bp_override(request: Request):
-    """Store manual BP input for 511520 (from Choice terminal)"""
-    try:
-        from services.bond_etf_valuation import set_manual_bp
-        body = await request.json()
-        code = body.get("code", "511520")
-        bp_7y = float(body.get("bp_7y", 0))
-        bp_10y = float(body.get("bp_10y", 0))
-        set_manual_bp(code, bp_7y, bp_10y)
-        return {"status": "ok", "data": {"code": code, "bp_7y": bp_7y, "bp_10y": bp_10y}}
-    except Exception as e:
-        logger.error("[BPOverride] Error: %s", e)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+    """[已停用] 511520 手动 BP 覆盖 → 见 ETFarb"""
+    return _BOND_MOVED
 
 @app.get("/api/bond/bp-override")
 async def get_bp_override(code: str = "511520"):
-    """Get today's manual BP override"""
-    try:
-        from services.bond_etf_valuation import get_manual_bp
-        override = get_manual_bp(code)
-        if override:
-            return {"status": "ok", "data": override}
-        return {"status": "ok", "data": None}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+    """[已停用] 读取手动 BP 覆盖 → 见 ETFarb"""
+    return _BOND_MOVED
 
 @app.post("/api/bond/bp-override/clear")
 async def clear_bp_override(request: Request):
-    """Clear manual BP override"""
-    try:
-        from services.bond_etf_valuation import clear_manual_bp
-        body = await request.json()
-        code = body.get("code", "511520")
-        clear_manual_bp(code)
-        return {"status": "ok"}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+    """[已停用] 清除手动 BP 覆盖 → 见 ETFarb"""
+    return _BOND_MOVED
 
 
 # --- Ledger / Bookkeeping APIs ---

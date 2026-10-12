@@ -31,16 +31,18 @@
         <!-- 数据表格 -->
         <div style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
           <n-empty v-if="silverRatioData.length === 0" description="暂无比价数据" />
-          <table v-else style="width: 100%; border-collapse: collapse; font-size: 12px; font-family: monospace;">
+          <!-- [AI-2026-10-12 重做 表头统一蓝底/字体token] 表头行背景 #f8fafc→#edf3fb、表头文字→#33629c（tr 上设 color 继承给全部 th）；内联裸 monospace 字体 → var(--co-font-mono)；padding 6px 8px 不变 -->
+          <!-- [AI-2026-10-12 重做] 旧 dist 形态：tr 去掉 color 继承，7 个 th 各自内联表头蓝（「比价」列保留 color+bold） -->
+          <table v-else style="width: 100%; border-collapse: collapse; font-size: 12px; font-family: var(--co-font-mono);">
             <thead>
-              <tr style="background: #f8fafc; border-bottom: 2px solid #e2e8f0; position: sticky; top: 0; z-index: 1;">
-                <th style="padding: 6px 8px; text-align: left;">日期</th>
-                <th style="padding: 6px 8px; text-align: right;">AG收盘(¥/kg)</th>
-                <th style="padding: 6px 8px; text-align: right;">成交量(手)</th>
-                <th style="padding: 6px 8px; text-align: right;">AG结算(¥/kg)</th>
-                <th style="padding: 6px 8px; text-align: right;">SI($/oz)</th>
-                <th style="padding: 6px 8px; text-align: right;">USDCNY(在岸)</th>
-                <th style="padding: 6px 8px; text-align: right; color: #d97706; font-weight: bold;">比价</th>
+              <tr style="background: #edf3fb; border-bottom: 2px solid #e2e8f0; position: sticky; top: 0; z-index: 1;">
+                <th style="padding: 6px 8px; text-align: left; color: #33629c;">日期</th>
+                <th style="padding: 6px 8px; text-align: right; color: #33629c;">AG收盘(¥/kg)</th>
+                <th style="padding: 6px 8px; text-align: right; color: #33629c;">成交量(手)</th>
+                <th style="padding: 6px 8px; text-align: right; color: #33629c;">AG结算(¥/kg)</th>
+                <th style="padding: 6px 8px; text-align: right; color: #33629c;">SI($/oz)</th>
+                <th style="padding: 6px 8px; text-align: right; color: #33629c;">USDCNY(在岸)</th>
+                <th style="padding: 6px 8px; text-align: right; color: #33629c; font-weight: bold;">比价</th>
               </tr>
             </thead>
             <tbody>

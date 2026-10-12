@@ -318,7 +318,8 @@ const allColumns: DataTableColumns<any> = [
     render(row: any) { return h(NText, { code: true, class: 'code-cell' }, { default: () => row.fund_code || '-' }) }
   },
   {
-    title: '名称', key: 'fund_name', width: 130, fixed: 'left', align: 'center', ellipsis: { tooltip: true },
+    // [AI-2026-10-12 重做 名称列左对齐+压宽] 宽度 130→100、align center→left（dist 实测口径；全 TAB 共用此列定义）
+    title: '名称', key: 'fund_name', width: 100, fixed: 'left', align: 'left', ellipsis: { tooltip: true },
     className: 'col-fund-name',
     render(row: any) {
       // [AI-2026-10-10] 主看板移除原油持仓口径小字：名称列去掉 canAnalyze 特殊样式/点击跳转，
@@ -418,7 +419,8 @@ const allColumns: DataTableColumns<any> = [
     }
   },
   {
-    title: 'T-1估值溢价', key: 'static_premium', width: 92, align: 'center',
+    // [AI-2026-10-12 重做 T-1估值溢价压宽] 宽度 92→84（dist 实测口径），align 保持 center
+    title: 'T-1估值溢价', key: 'static_premium', width: 84, align: 'center',
     render(row: any) {
       const top = !row.static_premium
         ? h('span', { class: 'num-cell compact' }, '-')
@@ -428,15 +430,18 @@ const allColumns: DataTableColumns<any> = [
     }
   },
   {
-    title: () => twoLineTitle('成交额', '(万)'), key: 'volume', width: 68, align: 'right',
+    // [AI-2026-10-12 重做 成交额居中+压宽] 宽度 68→60、align right→center（dist 实测口径；表头本就居中，数字改居中消除右偏错位）
+    title: () => twoLineTitle('成交额', '(万)'), key: 'volume', width: 60, align: 'center',
     render(row: any) { return h('span', { class: 'num-cell muted' }, formatVolume(row.volume)) }
   },
   {
-    title: () => twoLineTitle('份额', '(万)'), key: 'shares', width: 52, align: 'right',
+    // [AI-2026-10-12 重做 份额居中+压宽] 宽度 52→48、align right→center（dist 实测口径）
+    title: () => twoLineTitle('份额', '(万)'), key: 'shares', width: 48, align: 'center',
     render(row: any) { return h('span', { class: 'num-cell muted' }, formatShares(row.shares)) }
   },
   {
-    title: () => twoLineTitle('新增', '(万)'), key: 'shares_added', width: 48, align: 'right',
+    // [AI-2026-10-12 重做 新增列居中+压宽] 宽度 48→44、align right→center（dist 实测口径）
+    title: () => twoLineTitle('新增', '(万)'), key: 'shares_added', width: 44, align: 'center',
     fixedHeader: true,
     render(row: any) {
       const added = row.shares_added || 0
@@ -459,7 +464,8 @@ const allColumns: DataTableColumns<any> = [
     }
   },
   {
-    title: '指数名称', key: 'index_name', width: 80, align: 'center',
+    // [AI-2026-10-12 重做 指数名称左对齐] align center→left（宽度 80 不变）
+    title: '指数名称', key: 'index_name', width: 80, align: 'left',
     render(row: any) {
       const name = row.idx_name || row.related_index || '-'
       return h('span', { class: 'num-cell muted', style: 'font-size: 11px;' }, name)
@@ -709,8 +715,9 @@ const fundHistoryPositionDisplay = computed(() => {
 })
 
 // [AI-2026-10-06 东哥需求] 表头两行显示：主名 + 小字灰色单位行（如 成交额/(万)），压列宽不折行挤爆
-const twoLineTitle = (main: string, sub: string) =>
-  h('div', { style: 'line-height: 1.25; text-align: center;' }, [
+// [AI-2026-10-12 重做] 恢复 3 参 align（旧 dist: text-align: ${align}），模板字符串形式；旧 dist 无 3 参调用点，默认 center
+const twoLineTitle = (main: string, sub: string, align: string = 'center') =>
+  h('div', { style: `line-height: 1.25; text-align: ${align};` }, [
     h('div', {}, main),
     h('div', { style: 'font-size: 9px; color: #64748b; font-weight: 400;' }, sub),
   ])
@@ -742,7 +749,22 @@ const columns = computed<DataTableColumns<any>>(() => {
     const staticPremIndex = cols.findIndex(c => c.key === 'static_premium')
     cols.splice(staticPremIndex + 1, 0, 
       { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '实时成交价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0/M0)')]), key: 'futures_price', width: 100, align: 'center', render(row: any) { const v = row.ag0_price != null ? row.ag0_price : row.m0_price; return h('span', { class: 'num-cell' }, v != null ? Number(v).toFixed(0) : '-') } },
+      // [AI-2026-10-12 重做] 盘中涨跌列（旧 dist futures_chg）：成交价/昨结算-1；无数据输出 '-' 不兜底
+      // [AI-2026-10-12 重做] 与旧 dist 逐字等价：- 分支也包 span.num-cell；结果为单 span class=num-cell strong + style color（内层不包 strong）
+      { title: '盘中涨跌', key: 'futures_chg', width: 78, align: 'center', render(row: any) {
+        const p = row.ag0_price != null ? row.ag0_price : row.m0_price
+        const s = row.ag0_settlement != null ? row.ag0_settlement : row.m0_settlement
+        if (p == null || s == null || s <= 0) return h('span', { class: 'num-cell' }, '-')
+        const r = (Number(p) / Number(s) - 1) * 100
+        return h('span', { class: 'num-cell strong', style: { color: priceColor(r) } }, formatPercent(r, 2))
+      } },
       { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '昨结算价'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(AG0/M0)')]), key: 'futures_settle', width: 100, align: 'center', render(row: any) { const v = row.ag0_settlement != null ? row.ag0_settlement : row.m0_settlement; return h('span', { class: 'num-cell muted' }, v != null ? Number(v).toFixed(0) : '-') } },
+      // [AI-2026-10-12 重做] 当日VWAP列（旧 dist futures_vwap）：无数据输出 '-' 不兜底（禁填 0）
+      // [AI-2026-10-12 重做] 与旧 dist 逐字等价：标题内联 line-height 1.3 + 副行 font-size:10px/#64748b（非 twoLineTitle 助手）；'-' 包在 span.num-cell 内
+      { title: () => h('div', { style: 'line-height: 1.3; text-align: center;' }, [h('div', {}, '当日VWAP'), h('div', { style: 'font-size: 10px; color: #64748b;' }, '(结算价)')]), key: 'futures_vwap', width: 100, align: 'center', render(row: any) {
+        const v = row.ag0_vwap != null ? row.ag0_vwap : row.m0_vwap
+        return h('span', { class: 'num-cell' }, v == null ? '-' : Number(v).toFixed(0))
+      } },
       // [AI-2026-10-09 东哥拍板] 白银比价弹窗记录为待修项。
       //   本列是**列级独立交互**，整行点击上线后必须 stopPropagation，
       //   否则点它会同时弹「白银比价」+「基金详情」两个窗（叠在一起）。
@@ -797,13 +819,19 @@ const tableScrollX = computed(() => {
 }
 :deep(.n-data-table-th) {
   padding: 3px 2px !important;
-  background-color: #eef5ff !important;
+  /* [AI-2026-10-12 重做 表头统一蓝底] #eef5ff → #edf3fb（对齐基金详情·模拟持仓估值表参照色） */
+  background-color: #edf3fb !important;
   border-width: 1px 0 !important;
 }
 :deep(.n-data-table-tr:nth-child(even) .n-data-table-td) { background-color: #fbfdff !important; }
 :deep(.n-data-table-tr:hover .n-data-table-td) { background-color: #f6faff !important; }
 :deep(.n-data-table-cell) {
   padding: 0 !important;
+}
+/* [AI-2026-10-12 重做 名称列左贴边] 基线只有 className 无 CSS 规则；dist 实测有 padding-left:6px。
+   单元格全局 padding:0（见上），左对齐后文字会贴边，补 6px 内缩让名称不贴住固定列分隔线 */
+.col-fund-name {
+  padding-left: 6px !important;
 }
 
 .table-toolbar {
@@ -855,14 +883,16 @@ const tableScrollX = computed(() => {
   box-sizing: border-box;
 }
 .code-cell {
-  font-family: "Fira Code", Consolas, monospace;
+  /* [AI-2026-10-12 重做 字体统一token] Fira Code/Consolas/monospace 旧栈 → var(--co-font-mono) */
+  font-family: var(--co-font-mono);
   font-size: 12px;
   font-weight: 700;
   color: #1f2937;
 }
 /* [AI-2026-10-10] 删除 .fund-name-cell：名称列已改回普通 span，该 class 无引用 */
 .num-cell {
-  font-family: "Inter", "Fira Code", Consolas, sans-serif;
+  /* [AI-2026-10-12 重做 字体统一token] Inter/Fira Code/Consolas/sans 旧栈 → var(--co-font-sans) */
+  font-family: var(--co-font-sans);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   color: #1f2937;
@@ -891,9 +921,10 @@ const tableScrollX = computed(() => {
 :deep(.n-tabs .n-tabs-tab__label) { line-height: 1.3; }
 :deep(.n-tabs .n-tabs-tab--active) { color: #2563eb !important; background-color: #eef6ff !important; border-radius: 6px 6px 0 0; }
 :deep(.n-tabs .n-tabs-bar) { background-color: #2563eb !important; }
+/* [AI-2026-10-12 重做 表头统一蓝底/文字] 背景 #eef5ff→#edf3fb、文字 #21395c→#33629c（padding/字重/边框不动） */
 :deep(.n-data-table-th) {
-  background-color: #eef5ff !important;
-  color: #21395c !important;
+  background-color: #edf3fb !important;
+  color: #33629c !important;
   font-size: 12px;
   font-weight: 800 !important;
   border-bottom: 1px solid #dfe8f4 !important;
@@ -909,7 +940,8 @@ const tableScrollX = computed(() => {
   box-shadow: none !important;
 }
 :deep(.n-data-table .n-data-table-th--fixed-left) {
-  background-color: #eef5ff !important;
+  /* [AI-2026-10-12 重做 表头统一蓝底] 固定左列表头同步 #edf3fb（右侧固定列粉色 #fff1f2/#e11d48 为语义告警色，保持不动） */
+  background-color: #edf3fb !important;
 }
 :deep(.n-data-table .n-data-table-th--fixed-right) {
   background-color: #fff1f2 !important; /* 粉红色背景 */
@@ -1052,12 +1084,14 @@ const tableScrollX = computed(() => {
 
 /* [交换位置] 时钟 + 汇率样式 */
 .date { font-size: 11px; color: #7b8a9b; }
-.time { font-size: 14px; font-weight: bold; color: #2563eb; font-family: monospace; }
+/* [AI-2026-10-12 重做 字体统一token] 裸 monospace → var(--co-font-mono) */
+.time { font-size: 14px; font-weight: bold; color: #2563eb; font-family: var(--co-font-mono); }
 .exchange-rates { margin-top: 15px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; }
 .rate-group { display: flex; flex-direction: column; }
 .rate-label { font-size: 11px; color: #64748b; margin-bottom: 4px; white-space: nowrap; font-weight: 500; }
 .rate-row { display: flex; align-items: baseline; justify-content: space-between; gap: 4px; }
-.rate-value { font-size: 16px; font-weight: 800; color: #1e293b; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+/* [AI-2026-10-12 重做 字体统一token] Inter+系统默认旧栈 → var(--co-font-sans) */
+.rate-value { font-size: 16px; font-weight: 800; color: #1e293b; font-family: var(--co-font-sans); }
 .rate-change { font-size: 12px; font-weight: 700; }
 .rate-change.up { color: var(--co-up); }
 .rate-change.down { color: var(--co-down); }

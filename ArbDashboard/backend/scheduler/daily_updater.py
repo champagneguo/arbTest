@@ -26,6 +26,48 @@ from arbcore.analysis.common import EUR_FUND_CODES
 # 原 step4 内两处「上一交易日」只跳周末 ⇒ 9-25(中秋) 被当成交易日，预期净值日长期落后、
 # 每次跑都白抓一次东财（当日日志 501018 出现 498 次即此）；收盘价齐全判定同病。
 from arbcore.utils.market_calendar import is_trading_day
+
+# [AI-2026-10-11 东哥拍板] 告警通道（Telegram）：VPS 硬故障立即报警、不做兜底。
+# 宽松导入：本机/ARM 均可用；导入失败则降级为「只记日志」，绝不影响流水线。
+try:
+    from services.alert_service import send_alert as _send_alert
+except Exception:
+    try:
+        from ..services.alert_service import send_alert as _send_alert
+    except Exception:
+        _send_alert = None
+
+# [AI-2026-10-11 东哥要求] 各 VPS 数据源的**预期产出时刻**（北京时间；对齐 deploy_vps.py 的 crontab）。
+# 用途：`_try_sync_all_from_vps` 判为 NO_TODAY 时，据此提示"是正常时滞还是已超时"。
+VPS_EXPECTED_TIME = {
+    'shares':      '02:00',
+    'prices':      '03:00',
+    'nav':         '03:00',
+    'usa_prices':  '07:00',
+    'etf_nav':     '07:30',
+    'woody':       '09:20',
+    'fx':          '09:20',
+    'futures':     '09:20',
+    'index':       '16:30',
+    'hssi':        '15:30',   # 已停用（HSSI 迁 ETFarb），仅防御性保留
+}
+# [AI-2026-10-11] 本机（Python3.11）**缺 exchange_calendars / chinese_calendar**，
+# 故为「VPS 今日是否产出」的判定硬编码休市表 —— 与 VPS 各脚本内表**同源**，零依赖。
+_VPS_US_HOLIDAYS_2026 = {
+    '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25',
+    '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',
+}
+_VPS_JPX_HOLIDAYS_2026 = {
+    '2026-01-01', '2026-01-02', '2026-01-12', '2026-02-11', '2026-02-23',
+    '2026-03-20', '2026-04-29', '2026-05-04', '2026-05-05', '2026-05-06',
+    '2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23', '2026-08-11',
+    '2026-09-21', '2026-09-22', '2026-09-23', '2026-10-12', '2026-11-03',
+    '2026-11-23', '2026-11-24', '2026-12-23', '2026-12-31',
+}
+_VPS_EU_HOLIDAYS_2026 = {
+    '2026-01-01', '2026-04-03', '2026-04-06', '2026-05-01', '2026-05-14',
+    '2026-12-25', '2026-12-26',
+}
 # [AI-2026-08-16] 修复: account_private 为本地密钥文件(被 gitignore, 可能不存在),
 # WOODY/VPS 凭据缺失时必须容错(与项目其他模块一致), 否则后端 import 阶段直接崩溃起不来
 try:
@@ -86,6 +128,12 @@ class DailyUpdater(BaseApp):
         self.woody_crawler = WoodyWebCrawler()
         self.hist_manager = HistoricalDataManager(db_manager=self.db)
         self._woody_logged_in = False  # 延迟登录标记
+        # [AI-2026-10-11] VPS 同步状态表：key=data_type →
+        #   'HAS_TODAY' 有今日文件 / 'NO_TODAY' 连上但无今日文件（可能正常时滞，不报警）
+        #   'SSH_FAIL' 连接或同步异常（硬故障，报警） / 'NO_DIR' 远端目录不存在（硬故障，报警）
+        #   'NOT_CONFIGURED' 本机未配置 VPS 凭据
+        # 由 _try_sync_all_from_vps 写入；其返回值保持 list 不变 ⇒ 10 处调用点零改动。
+        self._vps_sync_status = {}
         # 降低第三方库日志噪音
         logging.getLogger('arbcore.fetchers.historical').setLevel(logging.WARNING)
     
@@ -117,6 +165,7 @@ class DailyUpdater(BaseApp):
         # [AI-2026-08-02] 降权：允许「仅密钥」认证（展示副本 arbsync + 密钥），
         # 不再强制要求 VPS_PASSWORD。需满足 主机+用户+至少一种凭据。
         if not VPS_HOST or not VPS_USER or (not VPS_PASSWORD and not VPS_KEY_PATH):
+            self._vps_sync_status[data_type] = 'NOT_CONFIGURED'
             return []
         
         # 数据目录迁移到 ArbDashboard/data/（与脚本目录解耦）
@@ -149,6 +198,8 @@ class DailyUpdater(BaseApp):
                 files = sftp.listdir(VPS_DATA_DIR)
             except IOError:
                 self.logger.warning(f"[VPS] 远程目录不存在: {VPS_DATA_DIR}")
+                self._vps_sync_status[data_type] = 'NO_DIR'
+                self._alert_vps_failure(data_type, f"远端数据目录不存在: {VPS_DATA_DIR}")
                 sftp.close(); ssh.close()
                 return []
 
@@ -192,11 +243,105 @@ class DailyUpdater(BaseApp):
             
             if synced_data_list:
                 self.logger.info(f"[VPS] {data_type} 数据同步完成，共获取 {len(synced_data_list)} 天记录")
+            # [AI-2026-10-11] 状态化：区分「有今日文件」与「无今日文件」——
+            # 后者可能是正常时滞（如本机 08:00 跑流水线时 VPS 16:30 的产物还没出），**不报警**。
+            today = datetime.now().strftime('%Y-%m-%d')
+            has_today = any(it.get('date') == today for it in synced_data_list)
+            self._vps_sync_status[data_type] = 'HAS_TODAY' if has_today else 'NO_TODAY'
+            if not has_today:
+                # [AI-2026-10-11] 仅记录；是否报警由各 step 的 _vps_missing_alert 判定
+                #（含「交易日 + 预期时刻 + 30min 宽限」三重判断），避免非产出日误报。
+                self.logger.info(f"[VPS] {data_type} 无今日({today})文件")
             return synced_data_list
-            
+
         except Exception as e:
             self.logger.warning(f"[VPS] 同步失败: {e}")
+            self._vps_sync_status[data_type] = 'SSH_FAIL'
+            self._alert_vps_failure(data_type, f"SSH/SFTP 同步失败: {e}")
         return []
+
+    def _alert_vps_failure(self, data_type: str, detail: str):
+        """[AI-2026-10-11 东哥拍板] VPS 硬故障立即告警（SSH 连不上 / 远端目录不存在）。
+
+        ⚠️ 「VPS 当日文件尚未落盘」不算故障（正常时滞），不在此报警 —— 由调用方按
+        「期望落盘时刻 + 宽限」另行判断。告警失败绝不影响主流程。
+        """
+        if _send_alert is None:
+            self.logger.error(f"🚨 [VPS-ALERT] {data_type}: {detail}（告警通道不可用）")
+            return
+        try:
+            _send_alert(f"东京 VPS 同步失败 · {data_type}\n{detail}",
+                        level="error", key=f"vps_fail_{data_type}")
+        except Exception as e:
+            self.logger.error(f"🚨 [VPS-ALERT] {data_type}: {detail}（告警发送异常: {e}）")
+
+    def _vps_gap_alert(self, data_type: str, covered: int, expected: int):
+        """[AI-2026-10-11 东哥铁律] VPS 只覆盖了一部分 → 报警，**缺口字段留空、不本地兜底**。"""
+        msg = f"{data_type} VPS 覆盖不全：{covered}/{expected}"
+        self.logger.warning(f"⚠️ [VPS-GAP] {msg} —— 按铁律不本地兜底，缺口字段留空")
+        if _send_alert is not None:
+            try:
+                _send_alert(f"东京 VPS 数据覆盖不全 · {msg}", level="warn", key=f"vps_gap_{data_type}")
+            except Exception as e:
+                self.logger.error(f"🚨 [VPS-GAP] 告警发送异常: {e}")
+
+    def _vps_source_due_today(self, data_type: str) -> bool:
+        """[AI-2026-10-11 修误报] 该源「今天是否应有产出」——复刻东京 VPS 各脚本的交易日判据。
+
+        采集类（T+1 凌晨采 T 日数据）看「昨天」；指数类（当日 16:30）看「今天」。
+        非产出日 → 无数据属正常，**绝不报警**（周日休市被误判为故障并狂发 BOT 的根因）。
+        """
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+        try:
+            if data_type in ('shares', 'prices', 'nav'):
+                # A股：market_calendar 的 _HOLIDAYS_2026 已含 2026 全年（无需第三方库）
+                return is_trading_day('A_SHARE', yesterday)
+            if data_type in ('usa_prices', 'etf_nav'):
+                return (yesterday.weekday() < 5
+                        and yesterday.strftime('%Y-%m-%d') not in _VPS_US_HOLIDAYS_2026)
+            if data_type == 'index':
+                d_s = today.strftime('%Y-%m-%d')
+                jp = today.weekday() < 5 and d_s not in _VPS_JPX_HOLIDAYS_2026
+                eu = today.weekday() < 5 and d_s not in _VPS_EU_HOLIDAYS_2026
+                return jp or eu
+            if data_type == 'hssi':
+                return is_trading_day('XHKG', today)
+            # woody / fx / futures：VPS 脚本 cron 为 1-5 且无假日表 ⇒ 工作日必产
+            return today.weekday() < 5
+        except Exception as e:
+            self.logger.warning(f"[VPS] {data_type} 交易日判据异常: {e}（保守按应产处理）")
+            return True
+
+    def _vps_missing_alert(self, data_type: str):
+        """[AI-2026-10-11 东哥铁律 + 修误报] VPS 无今日数据时：
+
+        只有「**应为产出日** 且 **已过预期时刻 + 30min 宽限**」才发 BOT 报警；
+        非产出日（市场休市）或未到点 → **只记 info，绝不发 BOT**（东哥：不到时间的消息没意义）。
+        两种情形都**不本地兜底**（字段留空）。
+        """
+        now = datetime.now()
+        now_hm = now.strftime('%H:%M')
+        # ① 今日非该源产出日（市场休市）→ 正常
+        if not self._vps_source_due_today(data_type):
+            self.logger.info(f"[VPS] {data_type} 今日为非产出日（市场休市），无数据属正常，不报警")
+            return
+        # ② 未到预期产出时刻（+30min 宽限）→ info，不发 BOT
+        exp = VPS_EXPECTED_TIME.get(data_type)
+        if exp:
+            hh, mm = int(exp[:2]), int(exp[3:])
+            due = now.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(minutes=30)
+            if now < due:
+                self.logger.info(f"[VPS] {data_type} 未到预期产出时刻({exp}+30min)，现在 {now_hm}，本步留空")
+                return
+        # ③ 应为产出日 + 已过点(+宽限) 仍无数据 → 真异常，报警
+        msg = f"{data_type} 今日无数据" + (f"（预期 {exp}，现已 {now_hm}）" if exp else "")
+        self.logger.warning(f"🚨 [VPS-MISS] {msg} —— 按铁律不本地兜底，字段留空")
+        if _send_alert is not None:
+            try:
+                _send_alert(f"东京 VPS 今日无数据 · {msg}", level="error", key=f"vps_miss_{data_type}")
+            except Exception as e:
+                self.logger.error(f"🚨 [VPS-MISS] 告警发送异常: {e}")
 
     def _try_fetch_from_vps(self, data_type='woody'):
         """保持兼容性的包装方法，仅返回当天的内容"""
@@ -246,11 +391,33 @@ class DailyUpdater(BaseApp):
         except Exception as e:
             self.logger.warning(f"检查 Woody 数据库时出错: {e}，继续连接VPS获取")
 
-        codes = [
-            str(fund.get('code', '')) 
-            for fund in self.config.get('funds', []) 
-            if str(fund.get('code', '')) != '161226' and fund.get('data_source') == 'woody'
-        ]
+        # [AI-2026-10-11 东哥定调] woody 抓取范围改以 **DB 权威**：读 unified_fund_list.data_source='woody'。
+        #   该列由 lof_config.yaml 的 data_source 字段同步而来（sync_unified_fund_list），
+        #   DB 为唯一真源，YAML 降格为退化兜底（与 step5 的 symbol_master 同源手法，见本文件 :1188）。
+        #   仅当 DB 列缺失/读取失败时才回退 yaml，保证不丢抓取能力。
+        codes = []
+        db_rows = None
+        try:
+            _c = self.db._get_conn()
+            try:
+                db_rows = _c.execute(
+                    "SELECT fund_code FROM unified_fund_list "
+                    "WHERE data_source = 'woody' AND fund_code != '161226' ORDER BY fund_code"
+                ).fetchall()
+            finally:
+                _c.close()
+        except Exception as e:
+            self.logger.warning(f"⚠️ [Woody] unified_fund_list 读取失败，退化用 YAML: {e}")
+            db_rows = None
+        if db_rows is not None:
+            codes = [str(r[0]) for r in db_rows if r[0]]
+        else:
+            # 退化：老 YAML 逻辑
+            codes = [
+                str(fund.get('code', ''))
+                for fund in self.config.get('funds', [])
+                if str(fund.get('code', '')) != '161226' and fund.get('data_source') == 'woody'
+            ]
         # 数据目录迁移到 ArbDashboard/data/（与脚本目录解耦）
         backup_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "ArbDashboard", "data", "woodyAPI"))
         
@@ -842,7 +1009,15 @@ class DailyUpdater(BaseApp):
             if vps_codes_covered.issuperset(set(all_codes)):
                 self.logger.info(f"✅ [VPS] 收盘价已全覆盖 {len(vps_codes_covered)} 只基金，跳过本地采集")
                 return
-            self.logger.info(f"📥 [VPS] 收盘价部分覆盖 {len(vps_codes_covered)}/{len(all_codes)} 只，其余走本地直连")
+            # [AI-2026-10-11 东哥铁律] 部分覆盖 → 报警 + 留空，不再本地兜底
+            self._vps_gap_alert('prices', len(vps_codes_covered), len(all_codes))
+            return
+
+        # [AI-2026-10-11 东哥铁律] VPS 无今日收盘价 → 报警(超时) + 留空，不再本地兜底。
+        self._vps_missing_alert('prices')
+        return
+
+        # ===== 以下为原本地兜底（腾讯 / 新浪），已按铁律禁用，保留可回退 =====
 
         # [AI-2026-08-03] 无日K线基金跳过名单（持久化）：腾讯/新浪均无日K线的基金（债券/封闭LOF）
         # 首次探测到即写入 arbcore/config/no_kline_funds.json，后续启动直接跳过，不再刷 WARNING。
@@ -1033,7 +1208,16 @@ class DailyUpdater(BaseApp):
                     if code_v and date_v and nav_v:
                         self._safe_save_fund_data(date_str=date_v, fund_code=code_v, nav=nav_v)
                         vps_nav_codes.add(code_v)
-            self.logger.info(f"📥 [VPS] 净值已导入 {len(vps_nav_codes)} 只基金，其余走本地东财直连")
+            if vps_nav_codes.issuperset(set(all_codes)):
+                self.logger.info(f"✅ [VPS] 净值已全覆盖 {len(vps_nav_codes)} 只，跳过本地东财")
+                return
+            # [AI-2026-10-11 东哥铁律] 部分覆盖 → 报警 + 留空，不再本地兜底
+            self._vps_gap_alert('nav', len(vps_nav_codes), len(all_codes))
+            return
+        # [AI-2026-10-11 东哥铁律] VPS 无今日净值 → 报警(超时) + 留空，不再本地兜底
+        self._vps_missing_alert('nav')
+        return
+        # ===== 以下为原本地兜底（东财逐 code），已按铁律禁用，保留可回退 =====
         # [AI-2026-07-23] QDII欧美/黄金原油（美股基金）净值在北京时间上午尚未发布，
         # 按 expected = T-2 判定，下午 3 点后才改为 T-1，避免无谓的东财抓取。
         # [AI-2026-08-06] 国内LOF/指数LOF/QDII亚洲/QDII日本 与 A 股同日收盘、无时差，
@@ -1111,7 +1295,7 @@ class DailyUpdater(BaseApp):
     def step4_5_sync_fund_purchase_status(self):
         """步骤4.5：[AI-2026-08-04] 从东京VPS拉取申赎状态JSON并入库(不再本地爬akshare)
 
-        数据链路: 东京VPS每日06:30爬东财→/root/ArbSiphon/data/purchase_status.json
+        数据链路: 东京VPS每日02:30爬东财（purchase_status_LOFETF.py）→/root/ArbSiphon/data/purchase_status.json
         → 本步用 account_private.VPS_* 密钥 paramiko 拉回→导入本地 fund_purchase_status。
         失败仅告警(非致命), 次日重试; 与"本地黄金源→推ARM"架构一致(本地不再自爬)。
 
@@ -1265,7 +1449,16 @@ class DailyUpdater(BaseApp):
                         if sym_v in index_write_syms:
                             self.db.upsert_index_history(symbol=sym_v, date=date_v, close=float(close_v))
                         vps_usa_covered.add(sym_v)
-            self.logger.info(f"📥 [VPS] 美股/指数日线已覆盖 {len(vps_usa_covered)} 只标的，其余走本地直连")
+            if vps_usa_covered.issuperset(set(symbols)):
+                self.logger.info(f"✅ [VPS] 美股/指数日线已全覆盖 {len(vps_usa_covered)} 只，跳过本地")
+                return
+            # [AI-2026-10-11 东哥铁律] 部分覆盖 → 报警 + 留空，不再本地兜底
+            self._vps_gap_alert('usa_prices', len(vps_usa_covered), len(symbols))
+            return
+        # [AI-2026-10-11 东哥铁律] VPS 无今日数据 → 报警(超时) + 留空，不再本地兜底
+        self._vps_missing_alert('usa_prices')
+        return
+        # ===== 以下为原本地兜底（新浪 per-symbol），已按铁律禁用，保留可回退 =====
 
         for sym in symbols:
             # [AI-2026-10-10] VPS 已覆盖的标的跳过本地直连（此前漏写 continue，VPS 块形同虚设、新浪请求量未减）
@@ -1308,7 +1501,8 @@ class DailyUpdater(BaseApp):
 
         vps_data = self._try_sync_all_from_vps('index')
         if not vps_data:
-            self.logger.info("⏭️ [VPS-INDEX] 无待同步的指数数据")
+            # [AI-2026-10-11 东哥铁律] 本步本就 VPS-only（无本地兜底）；无数据 → 报警(超时) + 留空
+            self._vps_missing_alert('index')
             return
 
         self.logger.info(f"🔄 [VPS-INDEX] 发现 {len(vps_data)} 份指数数据，正在同步入库...")
@@ -1419,7 +1613,8 @@ class DailyUpdater(BaseApp):
 
         vps_data = self._try_sync_all_from_vps('etf_nav')
         if not vps_data:
-            self.logger.info("⏭️ [VPS-NAV] 无待同步的ETF净值数据")
+            # [AI-2026-10-11 东哥铁律] 本步本就 VPS-only（无本地兜底）；无数据 → 报警(超时) + 留空
+            self._vps_missing_alert('etf_nav')
             return
 
         self.logger.info(f"🔄 [VPS-NAV] 发现 {len(vps_data)} 份净值数据，正在同步入库...")
@@ -1669,12 +1864,15 @@ class DailyUpdater(BaseApp):
             self.logger.info("✅ [VPS] 今日期货数据同步完成！")
             return
 
-        # 本地备用源
+        # [AI-2026-10-11 东哥铁律] VPS 无今日期货数据 → 报警(超时) + 留空，不再本地兜底。
         if self.db.is_access_synced_today(today_str, 'futures_vps_sync'):
-            # [AI-2026-08-06] 今日已由 VPS 同步过期货数据(仅因"防刷跳过"返回空列表)，无需告警；本地备用源补齐无害
-            self.logger.info("✅ [VPS] 今日期货数据此前已同步(VPS)，启动本地备用源补齐(无害)")
+            # 今日 VPS 已同步过（本次只是因防刷跳过返回空）→ 属正常，不报警
+            self.logger.info("✅ [VPS] 今日期货数据此前已同步(VPS)，无需处理")
         else:
-            self.logger.warning("⚠️ [VPS] 未获取到今日期货数据，启动本地新浪API备用源...")
+            self._vps_missing_alert('futures')
+        return
+
+        # ===== 以下为原本地备用源（data_fetcher 新浪期货），已按铁律禁用，保留可回退 =====
         from arbcore.fetchers.data_fetcher import data_fetcher
         fallback_data = data_fetcher.get_futures_settlement_data()
         if fallback_data:
@@ -1739,11 +1937,17 @@ class DailyUpdater(BaseApp):
                 return
             if vps_rows_count > 0:
                 missing = sorted(expected_share_codes - vps_codes)
-                self.logger.warning(
-                    f"⚠️ [VPS] 份额覆盖不全（{len(vps_codes & expected_share_codes)}/{len(expected_share_codes)}，缺 {missing[:8]}），转本地直采补齐"
-                )
+                self.logger.warning(f"⚠️ [VPS] 份额覆盖不全（缺 {missing[:8]}），按铁律不本地兜底")
+                self._vps_gap_alert('shares', len(vps_codes & expected_share_codes), len(expected_share_codes))
             else:
-                self.logger.info("⏭️ [VPS] 无今日份额数据，走本地直采")
+                # 无今日份额（可能只是时滞：VPS 02:00 才产 shares）→ 未到点 info / 超时报警
+                self._vps_missing_alert('shares')
+            return
+        # [AI-2026-10-11 东哥铁律] VPS 无份额数据 → 报警 + 留空，不再本地直采
+        self._vps_missing_alert('shares')
+        return
+
+        # ===== 以下为原本地直采（share_direct_fetcher），已按铁律禁用，保留可回退 =====
 
         try:
             S = self._import_share_fetcher()
@@ -1831,29 +2035,69 @@ class DailyUpdater(BaseApp):
         return S
 
     def _step10_calculate_static_valuation(self):
-        """步骤十：基于同步后的因子数据，计算所有基金的静态估值 (static_val)"""
-        # [AI-2026-07-03] 使用 __init__ 中已修正的 self.config_path，不再重复计算路径
+        """步骤十：基于同步后的因子数据，计算所有基金的静态估值 (static_val)
+
+        [AI-2026-10-11 东哥定调] **迭代口径改为 DB 权威**（「一切以 DB 为准，YAML 仅作备用」）：
+          旧实现遍历 lof_config.yaml 的 funds[]，YAML 一旦与 DB 漂移（漏列新基金/改名）
+          就会**漏算**——YAML 是「主表」时的历史残留。现改为遍历 unified_fund_list（DB 全集），
+          YAML 降格为「按 code 的可选补充」（仅提供 DB 尚无的 valuation_method 等字段，缺失不致命）。
+          与 step5 的 symbol_master 手法同源（DB 权威 + YAML 退化，见本文件 :1188 注释）。
+          篮子标的仍以 fund_basket_weights 表为权威（process_fund 内部逻辑，未变）。
+        """
+        # 1) 读 YAML —— 仅作「按 code 的补充配置」（不再是遍历主表）
         config_path = getattr(self, 'config_path', None)
         if not config_path or not os.path.exists(config_path):
             fallback_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "arbcore", "config", "lof_config.yaml")
-            if os.path.exists(fallback_path):
-                config_path = fallback_path
-            else:
-                self.logger.warning("⚠️ [静态估值] lof_config.yaml 不存在，跳过")
-                return
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+            config_path = fallback_path if os.path.exists(fallback_path) else None
+        yaml_by_code = {}
+        if config_path:
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    _cfg = yaml.safe_load(f) or {}
+                yaml_by_code = {str(fd.get('code', '')): fd
+                                for fd in _cfg.get('funds', []) if fd.get('code')}
+            except Exception as e:
+                self.logger.warning(f"⚠️ [静态估值] 读取 YAML 补充配置失败（继续用 DB）: {e}")
+
+        # 2) 从 DB 取基金全集 + 篮子归属（DB 权威）
+        conn = self.db._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT fund_code, fund_name, category, related_index, pos_ratio "
+                "FROM unified_fund_list ORDER BY fund_code"
+            ).fetchall()
+            basket_codes = {str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT fund_code FROM fund_basket_weights"
+            ).fetchall()}
+        finally:
+            conn.close()
+
         calc = StaticValuationCalculator(self.db)
         success = 0
-        for fund in config.get('funds', []):
-            if not fund.get('valuation_portfolio') and not fund.get('hedging_portfolio'):
-                continue  # 跳过无估值配置的基金（如白银期货）
+        total = 0
+        for code, name, category, related_index, pos_ratio in rows:
+            code = str(code)
+            yc = yaml_by_code.get(code, {})
+            yaml_portfolio = yc.get('valuation_portfolio') or yc.get('hedging_portfolio')
+            if code not in basket_codes and not yaml_portfolio:
+                continue  # 无篮子且无 YAML 配置 → 交 step11（跟踪指数公式）
+            fund = {
+                'code': code,
+                'name': name or yc.get('name', ''),
+                'category': category,                          # DB 权威
+                'related_index': related_index or yc.get('related_index', ''),
+                'pos_ratio': pos_ratio,
+                'valuation_method': yc.get('valuation_method', ''),   # YAML 补充；缺→''→resolve_method 按 category
+                'valuation_portfolio': yc.get('valuation_portfolio', []),
+                'hedging_portfolio': yc.get('hedging_portfolio', []),
+            }
+            total += 1
             try:
                 if calc.process_fund(fund):
                     success += 1
             except Exception as e:
-                self.logger.error(f"  ❌ [{fund.get('code')}] 静态估值计算失败: {e}")
-        self.logger.info(f"✅ [静态估值] 计算完成，{success}/{len(config.get('funds', []))} 只基金已更新")
+                self.logger.error(f"  ❌ [{code}] 静态估值计算失败: {e}")
+        self.logger.info(f"✅ [静态估值] 计算完成，{success}/{total} 只基金已更新")
 
     # ================================================================
     # 步骤十一：跟踪指数公式静态估值 (覆盖 QDII亚洲 / 国内LOF / 指数LOF)
@@ -1878,14 +2122,14 @@ class DailyUpdater(BaseApp):
         cursor = conn.cursor()
 
         # 1. 获取所有基金
-        cursor.execute("SELECT fund_code, category, related_index, pos_ratio FROM unified_fund_list")
+        cursor.execute("SELECT fund_code, category, related_index, pos_ratio, COALESCE(data_source, '') FROM unified_fund_list")
         all_funds = cursor.fetchall()
 
         # 2. 分类：step10 已处理黄金原油和有basket的基金，这里处理其余
         #    - 国内指数/指数LOF → A股，无汇率
         #    - QDII亚洲 → 港币
         #    - QDII欧美（无basket的，如标普500）→ 美元
-        #    - 白银 → 跳过（期货估值特殊）
+        #    - 白银(161226) → 跳过（期货估值特殊，交 step12）
         a_share = []
         hk_funds = []
         us_funds = []
@@ -1907,9 +2151,11 @@ class DailyUpdater(BaseApp):
 
         hk_index_syms = {'HSI', 'HSCEI', 'HSCCI', 'HSMCI', 'HSTECH', 'HSCI', 'HSSI', 'HSSNCNE', 'HSMI'}
 
-        for fund_code, category, related_index, pos_ratio in all_funds:
-            if category == '白银':
-                continue  # 白银跳过
+        for fund_code, category, related_index, pos_ratio, data_source in all_funds:
+            # [AI-2026-10-11 东哥定调] 161226 白银：分类已由「白银」并入「商品」，
+            #   但它走期货(A G0)口径、由 step12 负责 ⇒ 判据改按基金代码跳过（不再依赖 category 名）。
+            if fund_code == '161226':
+                continue  # 白银跳过（交 step12）
 
             ri = str(related_index).strip() if related_index else ''
             if not ri or ri == '-' or ri == '0':
@@ -1928,7 +2174,15 @@ class DailyUpdater(BaseApp):
             elif category == 'QDII欧美':
                 us_funds.append((fund_code, ri, pos_ratio or 0.95))
             elif category == '黄金原油':
-                continue  # step10 已处理
+                # [AI-2026-10-11 东哥定调] 黄金原油按 data_source 路由：
+                #   woody（真·多标的篮子，step10 用 woody position/篮子处理）→ 跳过；
+                #   非 woody（自算，如油气 3：162411/513350/159518，单标的 XOP）→ 走指数跟踪（usd）。
+                #   依据：单标的时 魔法公式 ≡ 矩阵公式 ≡ 指数跟踪（unified_valuation.py:56），结果等价；
+                #   且 step11 消费 DB pos_ratio，无需 woody 每日下发 position。
+                #   ⚠️ 口径差：step10 用 usa_etf_daily_prices.netvalue(NAV)，step11 用 index_history.close(市场价)。
+                if data_source == 'woody':
+                    continue
+                us_funds.append((fund_code, ri, pos_ratio or 0.95))
             else:
                 # 根据指数代码推断
                 if ri_upper in hk_index_syms or ri_lower in {s.lower() for s in hk_index_syms}:
@@ -1962,16 +2216,27 @@ class DailyUpdater(BaseApp):
 
             for fund_code, related_index, pos_ratio in funds:
                 # 获取指数历史数据
-                cursor.execute(
-                    "SELECT date, close FROM index_history WHERE symbol = ? ORDER BY date",
-                    (related_index.upper(),))
-                idx_rows = cursor.fetchall()
-                if not idx_rows:
-                    # 尝试小写
+                # [AI-2026-10-11 东哥定夺] 严格 NAV：related_index 若为美股 ETF（存在于 usa_etf_daily_prices），
+                #   取 netvalue(官方 NAV) 优先、退回 price(市场价)；否则退回 index_history.close。
+                #   目的：XOP 等「被当作指数用」的美股 ETF 与 step10 口径统一（均 NAV），消除 <0.1% 市场价差。
+                #   注：.INX/.NDX 在 usa_etf_daily_prices 中 netvalue 恒空 → COALESCE 落到 price，
+                #       与 index_history.close 同值，故指数类基金不受影响。
+                idx_rows = []
+                for _sym in (related_index, related_index.upper(), related_index.lower()):
                     cursor.execute(
-                        "SELECT date, close FROM index_history WHERE symbol = ? ORDER BY date",
-                        (related_index.lower(),))
+                        "SELECT date, COALESCE(NULLIF(netvalue, 0), price) FROM usa_etf_daily_prices WHERE symbol = ? ORDER BY date",
+                        (_sym,))
                     idx_rows = cursor.fetchall()
+                    if idx_rows:
+                        break
+                if not idx_rows:
+                    for _sym in (related_index.upper(), related_index.lower()):
+                        cursor.execute(
+                            "SELECT date, close FROM index_history WHERE symbol = ? ORDER BY date",
+                            (_sym,))
+                        idx_rows = cursor.fetchall()
+                        if idx_rows:
+                            break
                 if not idx_rows:
                     self.logger.warning(f"    [{fund_code}] 指数 {related_index} 无历史数据，跳过")
                     continue
@@ -2234,16 +2499,31 @@ class DailyUpdater(BaseApp):
         self.logger.info(f"✅ [简单估值] 完成，共更新 {total_updated} 条记录")
 
     # ================================================================
-    # 步骤十二：白银期货官方估值（历史表 static_val 列）
-    # 公式: static_val(D) = NAV(D-1) × AG0_settle(D) / AG0_settle(D-1)
-    # 与主面板实时官方估值 nav_home × VWAP/昨结算 同源：
-    #   - 主面板用盘中 VWAP；历史闭合日用当日官方结算价 settle(D) 替代（历史无 VWAP 概念）
-    #   - 二者均"以昨结算为基准、用当日 AG0 比值缩放昨净值"，故数字与真实 NAV 几乎一致，用于和 NAV 对比
+    # 步骤十二：期货驱动基金官方估值（历史表 static_val 列）
+    # 公式: static_val(D) = NAV(D-1) × 期货结算价(D) / 期货结算价(D-1)
+    # 驱动源 = futures_daily（新浪官方结算价，每日盘后入库；历史可用 backfill_futures_history.py 回填）
+    #   - 161226 白银 ← AG0（沪银连续，上期所）
+    #   - 159985 豆粕 ← M0（豆粕连续，大商所）
+    # 与主面板实时官方估值 nav_home × 今结算/昨结算 同源：
+    #   - 主面板盘中用 VWAP 替身；历史闭合日用当日官方结算价 settle(D) 替代（历史无 VWAP 概念）
+    #   - 二者均"以昨结算为基准、用当日期货比值缩放昨净值"，故数字与真实 NAV 接近，用于和 NAV 对比
     # 严格不 fallback：NAV(D-1)/settle(D)/settle(D-1) 任一为 0 或空 → 留 NULL（绝不拿 NAV 冒充）
     # ================================================================
-    def step12_silver_static_valuation(self, recent_days=None):
+    # [AI-2026-10-11 东哥定调] 泛化为「期货驱动」通用步骤：新增期货品种基金只需在下方登记 (fund_code, symbol)
+    FUTURES_STATIC_TARGETS = (
+        ('161226', 'AG0'),   # 白银 LOF ← 沪银连续
+        ('159985', 'M0'),    # 豆粕 ETF ← 豆粕连续
+    )
+
+    def step12_futures_static_valuation(self, recent_days=None):
+        """步骤十二：期货驱动基金官方估值（历史表 static_val 列）。逐只调用通用内核。"""
+        self.logger.info("=== 步骤十二：期货官方估值 (历史表 static_val 列) ===")
+        for fund_code, symbol in self.FUTURES_STATIC_TARGETS:
+            self._futures_static_valuation_one(fund_code, symbol, recent_days)
+
+    def _futures_static_valuation_one(self, fund_code, symbol, recent_days=None):
+        """通用内核：static_val(D) = NAV(D-1) × settle(D) / settle(D-1)（settle 取自 futures_daily[symbol]）"""
         import sqlite3
-        self.logger.info("=== 步骤十二：白银期货官方估值 (历史表 static_val 列) ===")
 
         # [AI-2026-08-16] 活库移出仓库根（物理隔离防泄漏）
         # [AI-2026-10-06] 搬入 src/ 后层数全变，改走 arbcore 统一解析（env ARB_MASTER_DB 优先 → _shared → database/ 上溯）
@@ -2253,50 +2533,48 @@ class DailyUpdater(BaseApp):
         conn.execute("PRAGMA busy_timeout = 30000")
         cursor = conn.cursor()
 
-        # 1. 取 161226 的 NAV 序列（按日期升序）
+        # 1. 取该基金的 NAV 序列（按日期升序）
         cursor.execute(
-            "SELECT date, nav FROM unified_fund_history WHERE fund_code='161226' ORDER BY date")
+            "SELECT date, nav FROM unified_fund_history WHERE fund_code=? ORDER BY date", (fund_code,))
         nav_rows = cursor.fetchall()
 
-        # 2. 取 AG0 结算价序列（过滤掉 0/None，避免脏分母）
+        # 2. 取期货结算价序列（过滤掉 0/None，避免脏分母）
         cursor.execute(
-            "SELECT date, settle_price FROM futures_daily WHERE symbol='AG0' ORDER BY date")
-        ag0_rows = cursor.fetchall()
-        ag0_settle = {d: float(s) for d, s in ag0_rows if s is not None and float(s) > 0}
+            "SELECT date, settle_price FROM futures_daily WHERE symbol=? ORDER BY date", (symbol,))
+        fut_rows = cursor.fetchall()
+        fut_settle = {d: float(s) for d, s in fut_rows if s is not None and float(s) > 0}
 
-        if not nav_rows or not ag0_settle:
-            self.logger.warning("   白银/AG0 数据不足，跳过")
+        if not nav_rows or not fut_settle:
+            self.logger.warning(f"   [{fund_code}] NAV 或 {symbol} 数据不足，跳过")
             conn.close()
             return
 
-        # 3. 逐日计算：prev_nav 作 NAV(D-1)，分母取「最近一个 ≤D 且有 AG0 结算价」的交易日
+        # 3. 逐日计算：prev_nav 作 NAV(D-1)，分母取「最近一个 <D 且有期货结算价」的交易日
         # [AI-2026-10-09 修复] 旧写法用 NAV 序列相邻行做 D-1，国庆休市(10-07)时 10-08 的
-        #   prev_date=09-30 虽能命中 ag0_settle，但中间跨了休市；且历史陈旧值(如 1.6456)未覆盖。
-        #   现改为：分母 sp = ag0_settle 中「严格小于 date 的最大日期」的结算价（最近有 AG0 的交易日），
-        #   分子 sd = ag0_settle[date]。跨休市/长假都能取到正确分母（10-08 的分母=09-30=14928）。
-        #   无 AG0 的 D（date not in ag0_settle）跳过；D 之前无任何 AG0 结算价也跳过。
-        ag0_sorted_dates = sorted(ag0_settle.keys())
+        #   prev_date=09-30 虽能命中结算价，但中间跨了休市；且历史陈旧值(如 1.6456)未覆盖。
+        #   现改为：分母 sp = 结算价中「严格小于 date 的最大日期」的结算价（最近有结算价的交易日），
+        #   分子 sd = 结算价[date]。跨休市/长假都能取到正确分母（10-08 的分母=09-30）。
+        #   无结算价的 D（date not in fut_settle）跳过；D 之前无任何结算价也跳过。
+        fut_sorted_dates = sorted(fut_settle.keys())
         updates = []
         prev_nav = None
-        prev_date = None
         today_str = datetime.now().strftime('%Y-%m-%d')
         for date, nav in nav_rows:
-            # [AI-2026-08-21] 今天这一行不写历史估值：盘中未收盘、AG0 结算价为昨结算，写进历史表会误导
-            if date != today_str and prev_nav is not None and prev_nav > 0 and date in ag0_settle:
-                sd = ag0_settle[date]
-                # 分母：最近一个严格小于 date 且有 AG0 结算价的交易日
+            # [AI-2026-08-21] 今天这一行不写历史估值：盘中未收盘、结算价为昨结算，写进历史表会误导
+            if date != today_str and prev_nav is not None and prev_nav > 0 and date in fut_settle:
+                sd = fut_settle[date]
+                # 分母：最近一个严格小于 date 且有结算价的交易日
                 sp = None
-                for d in reversed(ag0_sorted_dates):
+                for d in reversed(fut_sorted_dates):
                     if d < date:
-                        sp = ag0_settle[d]
+                        sp = fut_settle[d]
                         break
                 if sp is not None and sd > 0 and sp > 0:
                     updates.append((round(prev_nav * sd / sp, 4), date))
             prev_nav = nav if nav is not None else prev_nav
-            prev_date = date
 
         if not updates:
-            self.logger.info("   无可用白银官方估值计算")
+            self.logger.info(f"   [{fund_code}] 无可用期货官方估值计算")
             conn.close()
             return
 
@@ -2305,29 +2583,47 @@ class DailyUpdater(BaseApp):
             cutoff = (datetime.now() - timedelta(days=recent_days)).strftime('%Y-%m-%d')
             updates = [(v, d) for v, d in updates if d >= cutoff]
 
-        # 5. 写回 static_val（白银专属列，不碰其他字段）
+        # 5. 写回 static_val（专属列，不碰其他字段）
         count = 0
         for val, date in updates:
-            # [AI-2026-10-09] 打 writer 标识，供事后追查"这行白银 static_val 是谁写的"
+            # [AI-2026-10-09] 打 writer 标识，供事后追查"这行 static_val 是谁写的"
             cursor.execute(
-                "UPDATE unified_fund_history SET static_val=?, writer='lofarb:daily_updater.step12' WHERE fund_code='161226' AND date=?",
-                (val, date))
+                "UPDATE unified_fund_history SET static_val=?, writer='lofarb:daily_updater.step12' WHERE fund_code=? AND date=?",
+                (val, fund_code, date))
             if cursor.rowcount > 0:
                 count += 1
         conn.commit()
         conn.close()
-        self.logger.info(f"✅ [白银官方估值] 更新 {count} 条 static_val")
+        self.logger.info(f"✅ [{fund_code}] 期货官方估值({symbol}) 更新 {count} 条 static_val")
 
     def run(self, nav_only=False, refresh_morning=False, static_valuation=False, daily_close=False):
         today_str = datetime.now().strftime('%Y-%m-%d')
         now = datetime.now()
 
         if static_valuation:
-            self.logger.info("🚀 [静态估值模式] 仅执行静态估值计算 (step10 + step11)...")
+            self.logger.info("🚀 [静态估值模式] 仅执行静态估值计算 (step10 + step11 + step12)...")
             self._step10_calculate_static_valuation()
             self.step11_simple_static_valuation()
-            self.step12_silver_static_valuation()
+            self.step12_futures_static_valuation()
             self.logger.info("🎉 [静态估值模式] 静态估值计算完成！")
+            return
+
+        # ── 统一「非交易日停跑」门控（[AI-2026-10-11 东哥拍板]）──────────────────────
+        # 东哥定：**周末 / 法定假期停跑全部"自动"模式** —— 默认（无参，后端启动触发）、
+        #   `--nav-only`（18:00/19:30/21:00）、`--daily-close`（盘后兜底）、`--refresh-morning`（09:20）。
+        #   显式手动模式 `--static-valuation`（上面那支，12 号按钮）**放行** —— 人要看就能看。
+        # 判据 = **A股交易日历** `is_trading_day('A_SHARE')`（覆盖调休与国庆/春节等法定假期）；
+        #   日历不可用时退回「是否周末」。
+        # 回退开关：设环境变量 `ARB_WEEKEND_PIPELINE=1` 并重启后端 → 恢复旧行为（非交易日照跑）。
+        try:
+            _is_cn_td = is_trading_day('A_SHARE', now.date())
+        except Exception as _e_td:
+            self.logger.warning(f"[交易日门控] A股日历不可用({_e_td})，退回周末判断")
+            _is_cn_td = now.weekday() < 5
+        if not _is_cn_td and os.environ.get('ARB_WEEKEND_PIPELINE', '0') != '1':
+            self.logger.info(
+                f"📅 [{now.strftime('%Y-%m-%d')}] 非A股交易日 → 停跑（周末/假期停采）。"
+                f"如需强制运行：设 ARB_WEEKEND_PIPELINE=1 后重启。")
             return
 
         if daily_close:
@@ -2342,7 +2638,7 @@ class DailyUpdater(BaseApp):
             self.step8_fetch_sina_futures_from_vps()
             self._step10_calculate_static_valuation()
             self.step11_simple_static_valuation(recent_days=5)
-            self.step12_silver_static_valuation(recent_days=5)
+            self.step12_futures_static_valuation(recent_days=5)
             # [AI-2026-09-24 东哥拍板] 原油三基金持仓静态估值**已从本分支移出**。
             # 原因：美股 04:00(北京) 收盘，清晨刷新(08:00) step5 抓到 T-1 收盘价后即可算；
             # 而白天 A 股时段的实时估值正需要这份持仓静态估值 —— 等 15:00 盘后再算已毫无意义。
@@ -2379,18 +2675,24 @@ class DailyUpdater(BaseApp):
             self.logger.info("🎉 [NAV模式] 净值更新完毕！")
             return
 
-        # 默认：完整流水线（周末跳过除净值外的所有步骤）
+        # 默认：完整流水线
+        # [AI-2026-10-11 东哥拍板] 非交易日已在**函数入口统一拦掉**（见上「统一门控」）。
+        #   下面这段"周末轻量块"仅在回退开关 ARB_WEEKEND_PIPELINE=1 放行时才可达：
+        #   净值+收盘价+Woody补采+美股补采+静态估值（原为「防外出多日漏采」而设）。
         if now.weekday() in (5, 6):
-            self.logger.info("📅 [周末] 跳过完整流水线，执行净值+收盘价+Woody补采+静态估值+美股补采...")
+            self.logger.info("📅 [周末·回退开关已开] 执行轻量块：净值+收盘价+Woody补采+静态估值+美股补采...")
             self.step4_fetch_lof_market()
             # [AI-2026-07-25] 周末也跑收盘价采集（腾讯API），否则 LOF 收盘价缺失
             self._step4_fetch_prices()
-            # [AI-2026-07-25] 周末也跑 step1：从 VPS 补采缺失的 Woody 因子数据（防用户外出多日）
+            # [AI-2026-07-25] 周末也跑 step1：从 VPS 补采缺失的 Woody 因子数据
             self.step1_and_2_fetch_woody_api()
-            # [AI-2026-07-25] 周末也跑 step5：补采上次遗漏的美股 ETF 数据（防用户外出多日）
+            # [AI-2026-07-25] 周末也跑 step5：补采上次遗漏的美股 ETF 数据
             self.step5_fetch_usa_market_data(weekend_mode=True)
-            # [AI-2026-07-04] 周末也跑静态估值计算，避免 nav 更新后 static_val 缺失
+            # [AI-2026-10-11 东哥报缺] 该轻量块须含 step11/step12 —— 否则非篮子基金（跟踪指数
+            #   公式的 ETF/LOF）与期货类基金 static_val 全空，基金详情「历史误差」整列空白（如 159659）。
             self._step10_calculate_static_valuation()
+            self.step11_simple_static_valuation(recent_days=5)
+            self.step12_futures_static_valuation(recent_days=5)
             self.logger.info("🎉 [周末净值+Woody补采+静态估值+美股补采] 更新完毕！")
             return
         self._run_pipeline()
@@ -2414,7 +2716,7 @@ class DailyUpdater(BaseApp):
         self.step9_fetch_jsl_shares_from_vps()
         self._step10_calculate_static_valuation()
         self.step11_simple_static_valuation(recent_days=5)
-        self.step12_silver_static_valuation(recent_days=5)
+        self.step12_futures_static_valuation(recent_days=5)
         self.step13_oil_data_sync()
         self.logger.info("🎉 流水线执行完毕，数据大盘一切就绪！")
 

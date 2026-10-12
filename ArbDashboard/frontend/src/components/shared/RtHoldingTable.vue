@@ -10,16 +10,29 @@
   <div v-if="rows.length" class="rt-hold-wrap">
     <div class="rt-hold-head">
       <span>{{ title }}</span>
-      <span class="rt-hold-hint">{{ hint }}</span>
+      <span class="rt-hold-hint">{{ displayHint }}</span>
     </div>
     <table class="rt-hold-table">
       <thead>
-        <tr>
+        <!-- [AI-2026-10-12 重做] 表头按是否全期货双分支（旧 dist）：
+             futures 9 列（昨结算价/当日VWAP(结算价)）；normal 保持原 10 列，仅第 5 列旧表头文案改为「实时成交价」 -->
+        <tr v-if="isAllFutures">
           <th>序号</th>
           <th>标的</th>
           <th>市场</th>
           <th class="num">占比</th>
-          <th class="num">实时价 (T)</th>
+          <th class="num">实时成交价</th>
+          <th class="num">盘中涨跌</th>
+          <th class="num">昨结算价</th>
+          <th class="num">当日VWAP(结算价)</th>
+          <th class="num">估值影响</th>
+        </tr>
+        <tr v-else>
+          <th>序号</th>
+          <th>标的</th>
+          <th>市场</th>
+          <th class="num">占比</th>
+          <th class="num">实时成交价</th>
           <th class="num">盘中涨跌</th>
           <th class="num">T-1收盘</th>
           <th class="num">T-1涨跌</th>
@@ -28,17 +41,28 @@
         </tr>
       </thead>
       <tbody>
+        <!-- [AI-2026-10-12 重做] 每行按 r.isFutures 分支（旧 dist）：公共 4 列（序号/标的/市场/占比）之后，
+             futures 行 5 个 td（实时成交价/盘中涨跌/昨结算价/当日VWAP/估值影响）；normal 行 6 个 td 原样保留 -->
         <tr v-for="(r, i) in rows" :key="r.symbol">
           <td class="idx">{{ i + 1 }}</td>
           <td class="sym">{{ r.symbol }}<span v-if="r.name" class="sym-cn">{{ r.name }}</span></td>
           <td class="mkt"><span class="mkt-chip" :class="r.mktClass">{{ r.market }}</span></td>
           <td class="num">{{ fmtNum(r.weight) }}%</td>
-          <td class="num rt">{{ fmtNum(r.rt) }}</td>
-          <td class="num b" :style="{ color: chgColor(r.rtChg) }">{{ fmtSigned(r.rtChg) }}</td>
-          <td class="num">{{ fmtNum(r.t1) }}</td>
-          <td class="num" :style="{ color: chgColor(r.t1Chg) }">{{ fmtSigned(r.t1Chg) }}</td>
-          <td class="num">{{ fmtNum(r.t2) }}</td>
-          <td class="num" :style="{ color: chgColor(r.impact) }">{{ fmtSigned(r.impact, 3) }}</td>
+          <template v-if="r.isFutures">
+            <td class="num rt">{{ fmtNum(r.rt) }}</td>
+            <td class="num b" :style="{ color: chgColor(r.rtChg) }">{{ fmtSigned(r.rtChg) }}</td>
+            <td class="num">{{ fmtNum(r.settle) }}</td>
+            <td class="num">{{ fmtNum(r.vwap) }}</td>
+            <td class="num" :style="{ color: chgColor(r.impact) }">{{ fmtSigned(r.impact, 3) }}</td>
+          </template>
+          <template v-else>
+            <td class="num rt">{{ fmtNum(r.rt) }}</td>
+            <td class="num b" :style="{ color: chgColor(r.rtChg) }">{{ fmtSigned(r.rtChg) }}</td>
+            <td class="num">{{ fmtNum(r.t1) }}</td>
+            <td class="num" :style="{ color: chgColor(r.t1Chg) }">{{ fmtSigned(r.t1Chg) }}</td>
+            <td class="num">{{ fmtNum(r.t2) }}</td>
+            <td class="num" :style="{ color: chgColor(r.impact) }">{{ fmtSigned(r.impact, 3) }}</td>
+          </template>
         </tr>
       </tbody>
     </table>
@@ -47,8 +71,10 @@
 </template>
 
 <script setup lang="ts">
+// [AI-2026-10-12 重做] computed 用于全期货持仓时的表头/hint 双分支（旧 dist 形态）
+import { computed } from 'vue'
 /** 持仓实时价表：只渲染，不取数。取数一律由调用方用 useValuationCalculator().holdingRows 传入。 */
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   rows: any[]
   /** 区块标题（弹窗内标题层级不同，可覆盖） */
   title?: string
@@ -59,10 +85,17 @@ withDefaults(defineProps<{
   emptyText?: string
 }>(), {
   title: '📋 持仓实时价',
-  hint: '盘中涨跌 = 实时价 ÷ T-1收盘 − 1 · 估值影响 = 占比 × 盘中涨跌',
+  // [AI-2026-10-12 重做] 默认 hint 分子「实时价」→「实时成交价」（旧 dist 逐字）
+  hint: '盘中涨跌 = 实时成交价 ÷ T-1收盘 − 1 · 估值影响 = 占比 × 盘中涨跌',
   showEmpty: false,
   emptyText: '该基金无持仓明细数据（非季报持仓法基金）',
 })
+
+// [AI-2026-10-12 重做] 期货持仓专用算法说明（旧 dist 逐字：分子实时成交价、分母昨结算价）
+const HINT_FUTURES = '盘中涨跌 = 实时成交价 ÷ 昨结算价 − 1 · 估值影响 = 占比 × 盘中涨跌'
+// 全期货持仓（rows 非空且每行 isFutures）→ 表头/hint 走期货口径；否则维持默认
+const isAllFutures = computed(() => props.rows.length > 0 && props.rows.every(r => r.isFutures))
+const displayHint = computed(() => isAllFutures.value ? HINT_FUTURES : props.hint)
 
 const fmtNum = (v: number | null | undefined, digits = 2) =>
   v === null || v === undefined ? '-' : v.toFixed(digits)

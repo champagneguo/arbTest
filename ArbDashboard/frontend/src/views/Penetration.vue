@@ -408,7 +408,8 @@ onMounted(async () => {
 .pen-page {
   padding: 16px;
   color: #1f2328;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /* [AI-2026-10-12 重做 字体统一token] 系统默认旧栈（缺 CJK 字体）→ var(--co-font-sans) */
+  font-family: var(--co-font-sans);
   line-height: 1.6;
 }
 
@@ -562,8 +563,9 @@ td {
   white-space: nowrap;
 }
 th {
-  background: #f6f8fa;
-  color: #656d76;
+  /* [AI-2026-10-12 重做 表头统一蓝底/文字] 背景 #f6f8fa→#edf3fb、文字 #656d76→#33629c（padding 10px 14px 不动） */
+  background: #edf3fb;
+  color: #33629c;
   font-weight: 600;
   font-size: 12px;
   letter-spacing: 0.5px;
@@ -625,7 +627,8 @@ code {
   background: #f6f8fa;
   padding: 2px 6px;
   border-radius: 4px;
-  font-family: 'Consolas', monospace;
+  /* [AI-2026-10-12 重做 字体统一token] Consolas/monospace 旧栈 → var(--co-font-mono) */
+  font-family: var(--co-font-mono);
   font-size: 13px;
   color: #9a6700;
   border: 1px solid #d0d7de;

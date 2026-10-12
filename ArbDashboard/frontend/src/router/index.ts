@@ -46,15 +46,15 @@ const router = createRouter({
           redirect: '/dashboard'
         },
         {
+          // [AI-2026-10-12 重做] 原 /data 数据页（Data.vue）随 10-11 UI 改造归档（views/_deprecated/）。
+          //   与 analysis/auto-trade/ledger 同模式：保留占位兼容跳转，旧书签回主看板，不 404。
+          //   （10-11 23:46 构建 dist 实测：{path:'data',name:'Data',redirect:'/dashboard'}）
           path: 'data',
           name: 'Data',
-          component: () => import('../views/Data.vue')
+          redirect: '/dashboard'
         },
-        {
-          path: 'settings',
-          name: 'Settings',
-          component: () => import('../views/Settings.vue')
-        },
+        // [AI-2026-10-12 重做] 原 /settings 系统配置页（Settings.vue）随 10-11 UI 改造归档（views/_deprecated/），
+        //   路由整体移除（dist 实测：全量 JS 对 path:'settings' 零命中，无 Settings chunk，菜单「系统配置」项同步删除）。
         {
           path: 'etf-rotation',
           name: 'ETFRotation',

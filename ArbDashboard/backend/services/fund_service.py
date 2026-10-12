@@ -377,11 +377,14 @@ def _get_db_latest_spot(sym_col: str) -> Optional[float]:
     return None
 
 
-# [债券ETF] 引入债券ETF估值服务
-from services.bond_etf_valuation import get_bond_etf_valuation, BOND_ETF_META
-
-# 债券ETF代码集合
-BOND_ETF_CODES = set(BOND_ETF_META.keys())
+# [债券ETF] —— [AI-2026-10-11 东哥拍板] **已移除**：
+#   债券/货币 ETF（511880/511990/511360/511520，即「现金管理」）估值**已于 2026-09-18 迁至 ETFarb**
+#   （`ETFarb/src/core/bond_etf_valuation.py`）。LOFarb 的「现金管理」分类**已空**（无成员基金）
+#   ⇒ 原 `services/bond_etf_valuation.py` 及其全部消费点均为**死代码**，已归档 `_deprecated/`。
+#   此处保留一个**空集合**（而非删除变量）—— 使下方所有 `in BOND_ETF_CODES` 守卫恒为 False，
+#   即便将来漏删某处也不会 NameError，且回退只需改回 `set(BOND_ETF_META.keys())`。
+#   原值 = {511880, 511990, 511360, 511520}
+BOND_ETF_CODES = set()
 
 # ============================================================
 # [V8.1] 轻量级 Dashboard 缓存（5秒 TTL）
@@ -475,7 +478,12 @@ def _is_trading_day(conn) -> bool:
     中间价(usd/hkd/jpy_cny_mid)仅在境内交易日由央行公布；节假日/周末虽仍可能有
     即期 spot 行情，但中间价列为 NULL，且 exchange_rate 每日仍会落一行。故以"最新一行
     是否存在任一中间价"作为交易日信号，而非单纯比较日期——这样国庆等长假期
-    （每日都有 spot 行、但 mid 全空）才能被正确识别为非交易日，整体跳过实时估值。
+    （每日都有 spot 行、但 mid 全空）才能被正确识别为非交易日，整体跳过实时估值计算。
+    [AI-2026-10-11 决策] 曾尝试在此前置 A 股市场日历守卫（周末/法定假日直接 False），
+    实测发现副作用：161226/159985 的实时块与「昨结算价」独立展示整块挂在 trading_day 上，
+    周末被判非交易日会连"昨结算价/官方估值"一起丢掉（与东哥"始终展示昨结算价"相冲突）。
+    故此处**回退**日历守卫、保持原「中间价已公布」判据；周末涨跌幅错位改由消费端就地修正
+    （prev_close 用 is_a_share_session 守卫，见 metrics prev_close 段），互不干扰。
     """
     now = time.time()
     if _trading_day_cache['value'] is not None and (now - _trading_day_cache['time']) < 60:
@@ -647,6 +655,72 @@ def _get_ag0_future_quote():
     except Exception:
         pass
     return quote
+
+
+# [AI-2026-10-11 东哥要求] 期货法基金「虚拟持仓」展示支持：
+#   161226 白银→AG0(上期所)、159985 豆粕→M0(大商所)。这两只无 ETF 篮子（valuation_portfolio 为空），
+#   但「持仓估值」面板应显示其驱动的期货合约（= 估值所用标的，占比 100%），而非"无持仓明细"。
+_FUTURES_DISPLAY_NAMES = {'AG0': '沪银主连', 'M0': '豆粕主连'}
+
+
+def _get_m0_future_quote():
+    """获取大商所豆粕 M0 实时盘口（新浪 nf_M0；东财无 DCE 通道，不强行加 SSE）。
+    字段与 _get_ag0_future_quote 对称：price=最新价、settlement=昨结算价、vwap=动态结算均价。"""
+    quote = None
+    try:
+        from arbcore.utils.sina_cache import get_sina_quotes
+        raw = get_sina_quotes(['nf_M0']).get('nf_M0')
+        if raw:
+            parts = raw.split(',')
+            if len(parts) >= 11:
+                quote = {
+                    'price': float(parts[8]) if parts[8] else 0.0,
+                    'bid': float(parts[6]) if len(parts) > 6 and parts[6] else 0.0,
+                    'ask': float(parts[7]) if len(parts) > 7 and parts[7] else 0.0,
+                    'settlement': float(parts[10]) if parts[10] else 0.0,
+                    'vwap': float(parts[9]) if len(parts) > 9 and parts[9] else 0.0,
+                    'source': '新浪',
+                }
+    except Exception:
+        pass
+    return quote
+
+
+def _futures_session_open(symbol: str) -> bool:
+    """期货交易时段判定（AG0=上期所 / M0=大商所）。未知品种返回 False。"""
+    try:
+        from arbcore.utils.market_calendar import is_shfe_open, is_dce_open
+        if symbol == 'AG0':
+            return bool(is_shfe_open())
+        if symbol == 'M0':
+            return bool(is_dce_open())
+    except Exception:
+        pass
+    return False
+
+
+def _get_futures_official_price(conn, symbol: str, today: str, column: str = 'close_price'):
+    """期货当日官方价：column='close_price' 官方收盘价 / 'settle_price' 当日结算价（白名单外返回 None）。
+    当日无行且今日非交易日（周末/节假日）→ 回退最近一个已收盘交易日（最新一行 ≤ 今日），
+    与主看板「实时成交价」休市口径一致；否则返回 None（绝不向更早日期回溯）。"""
+    if column not in ('close_price', 'settle_price'):
+        return None
+    try:
+        row = conn.execute(
+            f"SELECT {column} FROM futures_daily WHERE symbol=? AND date=? AND {column}>0",
+            (symbol, today)
+        ).fetchone()
+        if not row:
+            from arbcore.utils.market_calendar import is_trading_day as _cal_td
+            if not _cal_td('A_SHARE', datetime.now().date()):
+                row = conn.execute(
+                    f"SELECT {column} FROM futures_daily WHERE symbol=? AND date<=? AND {column}>0 "
+                    "ORDER BY date DESC LIMIT 1", (symbol, today)
+                ).fetchone()
+        return float(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
 
 _prefetch_cache = {}
 _prefetch_cache_time = 0
@@ -1248,6 +1322,9 @@ class FundService:
         self._calculator = None
         # [AI-2026-08-26] 盘后兜底防并发锁（防 _step4_fetch_prices 子进程风暴）
         self._ensure_close_lock = threading.Lock()
+        # [AI-2026-10-11 方案A·东哥拍板] 进程内「当日收盘价已补齐」记忆：拉齐后当天不再查 DB。
+        #   本方法由**每次看板刷新**调用，原实现每次刷新都查一次 DB；跨天自动失效（比对日期字符串）。
+        self._ensure_close_done_date = None
     
     def _get_calculator(self):
         """懒加载估值计算器"""
@@ -1713,8 +1790,17 @@ class FundService:
                     #   显示的即最后交易日的涨跌幅，不会退成 0。
                     if not valid_prices.empty:
                         _latest_d = str(valid_prices.iloc[0]['date'])[:10]
-                        if trading_day and _latest_d != _today_bj:
-                            # 今日尚未收盘入库 ⇒ 最新一行即"昨收"
+                        # [AI-2026-10-11 东哥报缺] 原条件 `trading_day and _latest_d != _today_bj`
+                        #   在周末/节假日会误判：_is_trading_day 的判据是「exchange_rate 最新一行
+                        #   是否有中间价」，而周末根本不写新行 ⇒ 最新一行是上周五（有中间价）⇒
+                        #   被当成「今天仍是交易日」⇒ 昨收取到 iloc[0](最新收盘=当日现价)
+                        #   ⇒ 主看板「涨跌幅」整列恒 0.00%（东哥 10-11 实测：全部基金只显示现价）。
+                        #   正解：只有「今天确实是 A 股交易日 且 正处于盘中（今日收盘尚未落库）」
+                        #   时，最新一行才代表"昨收"；周末/节假日/盘后已落库/开盘前一律取 iloc[1]，
+                        #   即显示最后一个交易日的真实涨跌幅，不再恒 0。
+                        _intraday = trading_day and is_a_share_session() and _latest_d != _today_bj
+                        if _intraday:
+                            # 交易日盘中且今日尚未收盘入库 ⇒ 最新一行即"昨收"
                             metrics['prev_close'] = valid_prices.iloc[0]['price']
                         elif len(valid_prices) >= 2:
                             metrics['prev_close'] = valid_prices.iloc[1]['price']
@@ -1771,62 +1857,59 @@ class FundService:
                     except Exception as e:
                         logger.error(f"Error getting realtime quote for {code}: {e}")
 
-                # ── [债券ETF] 511880/511360/511520 估值 ──
-                if code in BOND_ETF_CODES and trading_day:
-                    try:
-                        bv = get_bond_etf_valuation(self.db, self.market_data_service)
-                        val = bv.get_valuation(code)
-                        est_nav = val.get('estimated_nav')
-                        if est_nav and est_nav > 0:
-                            metrics['rt_val'] = round(est_nav, 4)
-                            metrics['bond_etf_method'] = val.get('method', '')
-                            metrics['avg_daily_growth'] = val.get('avg_daily_growth')
-                            metrics['treasury_index_pct'] = val.get('treasury_index_pct')
-                            # 国债指数实时价 (511360用sh000012, 511520不用)
-                            if code == '511360':
-                                ti_data = bv._get_treasury_index_data()
-                                if ti_data:
-                                    metrics['treasury_index_price'] = ti_data.get('price')
-                            # 511520: 日均票息 + T2609期货方向
-                            if code == '511520':
-                                metrics['daily_coupon'] = val.get('daily_coupon')
-                                metrics['futures_pct'] = val.get('futures_pct')
-                                metrics['futures_coefficient'] = val.get('futures_coefficient')
-                            # 用预估净值作为静态估值（因为没有数据库历史记录）
-                            metrics['static_val'] = round(est_nav, 4)
-                            # 用最新实际净值作为昨收价（用于涨跌幅计算）
-                            latest_nav = val.get('latest_nav')
-                            if latest_nav and latest_nav > 0:
-                                metrics['nav'] = round(latest_nav, 4)
-                                metrics['prev_close'] = round(latest_nav, 4)
-                            if metrics.get('price', 0) > 0:
-                                metrics['rt_premium'] = round((metrics['price'] / est_nav - 1) * 100, 3)
-                            if metrics.get('price', 0) > 0:
-                                metrics['bond_spread'] = round(metrics['price'] - est_nav, 4)
-                    except Exception as e:
-                        logger.error(f"[BondETF] 估值失败 {code}: {e}")
-                else:
-                    # ── 5–6. 原有实时估值计算 ──
-                    metrics['rt_val'] = None
-                    metrics['rt_premium'] = None
+                # ── 5–6. 原有实时估值计算 ──
+                # [AI-2026-10-11 东哥拍板] 原 `if code in BOND_ETF_CODES and trading_day` 分支
+                # （511880/511360/511520 现金管理估值，调 BondETFValuation）**整块移除** ——
+                # 债券/货币 ETF 估值已于 2026-09-18 迁至 ETFarb，LOFarb「现金管理」分类已空
+                # ⇒ 该分支恒不执行，属死代码；移除后行为不变（非债券基金本就落到此 else 逻辑）。
+                metrics['rt_val'] = None
+                metrics['rt_premium'] = None
 
                 # [AI-2026-07-23] QDII日本基金：NK期货实时估值（Woody 公式）
                 # Woody: fVal = NK_real * JPYCNY_real / fFactor, fFactor = NK_base * JPYCNY_base / NAV_base
                 # 等价于: rt_val = NAV_base * [(1-pos) + pos * (NK_real/NK_base) * (JPYCNY_real/JPYCNY_base)]
+                # [AI-2026-10-11] 按驱动指数分派：日经225(N225)→NK 期货；东证TOPIX→新浪 znb_TOPIX 现货。
+                #   TOPIX 无对应期货源；woody 旧符号 znb_TPX 已停更，新浪 znb_TOPIX 现货实时是活的，取「现价/昨收」作比值。
                 if category == 'QDII日本' and metrics.get('nav', 0) > 0 and trading_day:
                     try:
-                        nk_quote = self.market_data_service.get_realtime_quote('NK') if self.market_data_service else None
-                        nk_current = float(nk_quote.get('price', 0) or 0) if nk_quote else 0.0
-                        if nk_current > 0:
-                            # 获取 T-1 基准日数据（与 NAV 同一天）
-                            t1_row = conn.execute("""
-                                SELECT h.date, h.nav, COALESCE(r.jpy_cny_spot, r.jpy_cny_mid) AS fx_base
-                                FROM unified_fund_history h
-                                LEFT JOIN exchange_rate r ON h.date = r.date
-                                WHERE h.fund_code = ? AND h.nav > 0 AND (r.jpy_cny_spot > 0 OR r.jpy_cny_mid > 0)
-                                ORDER BY h.date DESC LIMIT 1
-                            """, (code,)).fetchone()
-                            if t1_row:
+                        _jp_driver = str(fund.get('related_index') or '').strip().upper()
+                        # T-1 基准日数据（NAV + 日元在岸价），日经/TOPIX 共用
+                        t1_row = conn.execute("""
+                            SELECT h.date, h.nav, COALESCE(r.jpy_cny_spot, r.jpy_cny_mid) AS fx_base
+                            FROM unified_fund_history h
+                            LEFT JOIN exchange_rate r ON h.date = r.date
+                            WHERE h.fund_code = ? AND h.nav > 0 AND (r.jpy_cny_spot > 0 OR r.jpy_cny_mid > 0)
+                            ORDER BY h.date DESC LIMIT 1
+                        """, (code,)).fetchone()
+                        if _jp_driver == 'TOPIX':
+                            # 东证TOPIX：新浪 znb_TOPIX 现货（[1]=现价, [9]=昨收；兜底 现价-涨跌额）
+                            from arbcore.utils.sina_cache import get_sina_quotes
+                            _raw_tp = (get_sina_quotes(['znb_TOPIX']) or {}).get('znb_TOPIX') or ''
+                            _tp = _raw_tp.split(',') if _raw_tp else []
+                            tp_current = float(_tp[1]) if len(_tp) > 1 and _tp[1] else 0.0
+                            tp_prev = float(_tp[9]) if len(_tp) > 9 and _tp[9] else (
+                                (tp_current - float(_tp[2])) if len(_tp) > 2 and _tp[2] else 0.0)
+                            if tp_current > 0 and tp_prev > 0 and t1_row:
+                                base_date = t1_row[0]
+                                nav_base = float(t1_row[1])
+                                fx_base = float(t1_row[2])
+                                fx_current = _daily_snapshot.get('jpy_cny_spot') or 0.0
+                                if fx_current > 0 and fx_base > 0 and nav_base > 0:
+                                    pos = float(fund.get('pos_ratio', 0.95))
+                                    rt_val = basket_valuation(
+                                        nav_base, pos,
+                                        [{'symbol': 'TOPIX', 'current_price': tp_current,
+                                          'base_price': tp_prev, 'weight': 1.0}],
+                                        fx_base, fx_current, hedge=None,
+                                    )
+                                    if rt_val is not None:
+                                        metrics['rt_val'] = round(rt_val, 4)
+                                        if metrics.get('price', 0) > 0:
+                                            metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
+                        else:
+                            nk_quote = self.market_data_service.get_realtime_quote('NK') if self.market_data_service else None
+                            nk_current = float(nk_quote.get('price', 0) or 0) if nk_quote else 0.0
+                            if nk_current > 0 and t1_row:
                                 base_date = t1_row[0]
                                 nav_base = float(t1_row[1])
                                 fx_base = float(t1_row[2])
@@ -1958,7 +2041,19 @@ class FundService:
                                         "WHERE symbol='AG0' AND date=? AND close_price>0 "
                                         "AND settle_price>0", (_today,)
                                     ).fetchone()
-                                    # 盘后官方收盘口径：rt_val 分子=今日官方收盘、static_val 分子=今日官方结算
+                                    # [AI-2026-10-11 东哥口径] 今日无官方收盘行（周末/节假日）→ 回退
+                                    #   最近一个已收盘交易日的官方收盘/结算（futures_daily 最新一行 ≤ 今日），
+                                    #   使"收盘后"的参考估值 / 实时成交价照常展示（分子用实盘价）。
+                                    #   仅当今日非期货交易日时启用，避开交易日上午/傍晚入库前窗口误取旧值。
+                                    if not _rd:
+                                        from arbcore.utils.market_calendar import is_trading_day as _cal_td
+                                        if not _cal_td('A_SHARE', datetime.now().date()):
+                                            _rd = _conn_c.execute(
+                                                "SELECT close_price, settle_price FROM futures_daily "
+                                                "WHERE symbol='AG0' AND date<=? AND close_price>0 "
+                                                "AND settle_price>0 ORDER BY date DESC LIMIT 1", (_today,)
+                                            ).fetchone()
+                                    # 盘后官方收盘口径：rt_val 分子=官方收盘、static_val 分子=官方结算
                                     if _rd:
                                         _close, _settle = float(_rd[0]), float(_rd[1])
                                         _rt = nav_home * (_close / settlement_price)
@@ -1966,7 +2061,11 @@ class FundService:
                                         if metrics.get('price', 0) > 0:
                                             metrics['rt_premium'] = round((metrics['price'] / _rt - 1) * 100, 3)
                                         metrics['static_val'] = round(nav_home * (_settle / settlement_price), 4)
+                                        # [AI-2026-10-11 东哥口径] 「实时成交价」列收盘后显示"实盘价"（官方收盘）
+                                        metrics['ag0_price'] = _close
                                         metrics['ag0_close'] = _close
+                                        # [AI-2026-10-11 东哥要求] 「当日VWAP(结算价)」列：休市时=当日官方结算价
+                                        metrics['ag0_vwap'] = _settle
                                         logger.debug(f"[{code}] 盘后官方收盘口径 rt_val={metrics['rt_val']} "
                                                      f"(AG0官方收盘={_close}) static_val={metrics['static_val']} "
                                                      f"(AG0今日结算={_settle})")
@@ -1993,6 +2092,8 @@ class FundService:
                             # [AI-2026-08-21] 严禁 fallback 到 NAV：VWAP 缺失即无官方估值，留 None。
                             if vwap > 0 and settlement_price > 0:
                                 metrics['static_val'] = round(nav_home * (vwap / settlement_price), 4)
+                                # [AI-2026-10-11 东哥要求] 「当日VWAP(结算价)」列：盘中=VWAP动态结算均价
+                                metrics['ag0_vwap'] = vwap
                             else:
                                 metrics['static_val'] = None
 
@@ -2068,11 +2169,16 @@ class FundService:
                         # ── 官方估值 static_val（与 161226 对称，东哥 10-09 拍板）──
                         # 分母 = M 昨结算(parts[10])；分子 = M 今日结算价（盘中用 VWAP parts[9] 替身，
                         # 盘后 parts[9] 即官方结算价）。盘前/盘中/盘后同一公式，分子直接取 m_vwap。
-                        # 休市时段 m_vwap 已被上方守卫置 0 → 官方估值 None（与 161226 一致）。
-                        if m_vwap > 0 and m_settlement > 0 and nav_home > 0:
-                            metrics['static_val'] = round(nav_home * (m_vwap / m_settlement), 4)
-                        else:
-                            metrics['static_val'] = None
+                        # [AI-2026-10-11 东哥报缺] 仅在 M0 交易时段内覆盖 static_val：休市时 m_vwap 已被
+                        #   上方守卫置 0，若仍走 else→None 会把库里 step12 写好的官方结算估值清空
+                        #   ——豆粕「官方估值」整夜/周末恒显示 '-' 的根因。对齐 161226：休市不覆盖。
+                        if _m_session_open:
+                            if m_vwap > 0 and m_settlement > 0 and nav_home > 0:
+                                metrics['static_val'] = round(nav_home * (m_vwap / m_settlement), 4)
+                                # [AI-2026-10-11 东哥要求] 「当日VWAP(结算价)」列：盘中=VWAP动态结算均价
+                                metrics['m0_vwap'] = m_vwap
+                            else:
+                                metrics['static_val'] = None
 
                         # [AI-2026-10-09] 159985 M0 盘后官方收盘口径（与 161226 AG0 分支对称，
                         # 模板=fund_service.py 1943-1975）：盘中实时价会被收盘后收敛丢弃（休市守卫
@@ -2090,7 +2196,17 @@ class FundService:
                                         "WHERE symbol='M0' AND date=? AND close_price>0 "
                                         "AND settle_price>0", (_today,)
                                     ).fetchone()
-                                    # 盘后官方收盘口径：rt_val 分子=今日官方收盘、static_val 分子=今日官方结算
+                                    # [AI-2026-10-11 东哥口径] 与 161226 对称：今日无官方收盘行（周末/节假日）
+                                    #   → 回退最近一个已收盘交易日的官方收盘/结算（最新一行 ≤ 今日）。
+                                    if not _rdm:
+                                        from arbcore.utils.market_calendar import is_trading_day as _cal_td
+                                        if not _cal_td('A_SHARE', datetime.now().date()):
+                                            _rdm = _conn_m.execute(
+                                                "SELECT close_price, settle_price FROM futures_daily "
+                                                "WHERE symbol='M0' AND date<=? AND close_price>0 "
+                                                "AND settle_price>0 ORDER BY date DESC LIMIT 1", (_today,)
+                                            ).fetchone()
+                                    # 盘后官方收盘口径：rt_val 分子=官方收盘、static_val 分子=官方结算
                                     if _rdm:
                                         _m_close, _m_settle = float(_rdm[0]), float(_rdm[1])
                                         _rt_m = nav_home * (_m_close / m_settlement)
@@ -2098,7 +2214,11 @@ class FundService:
                                         if metrics.get('price', 0) > 0:
                                             metrics['rt_premium'] = round((metrics['price'] / _rt_m - 1) * 100, 3)
                                         metrics['static_val'] = round(nav_home * (_m_settle / m_settlement), 4)
+                                        # [AI-2026-10-11 东哥口径] 「实时成交价」列收盘后显示"实盘价"（官方收盘）
+                                        metrics['m0_price'] = _m_close
                                         metrics['m0_close'] = _m_close
+                                        # [AI-2026-10-11 东哥要求] 「当日VWAP(结算价)」列：休市时=当日官方结算价
+                                        metrics['m0_vwap'] = _m_settle
                                         logger.debug(f"[{code}] 盘后官方收盘口径 rt_val={metrics['rt_val']} "
                                                      f"(M0官方收盘={_m_close}) static_val={metrics['static_val']} "
                                                      f"(M0今日结算={_m_settle})")
@@ -2273,14 +2393,12 @@ class FundService:
                                             metrics['rt_premium'] = round((metrics['price'] / metrics['rt_val'] - 1) * 100, 3)
 
                             # [AI-2026-07-23] QDII日本基金：用 NK 期货 + 在岸价 做实时估值（Woody 公式）
+                            # [AI-2026-10-11] 按驱动指数分派：日经225(N225)→NK 期货；东证TOPIX→新浪 znb_TOPIX 现货
                             if not metrics.get('rt_val') and category == 'QDII日本':
                                 try:
-                                    # 获取 NK 期货实时价（hf_NK）
-                                    nk_quote = self.market_data_service.get_realtime_quote('NK') if self.market_data_service else None
-                                    nk_price = nk_quote.get('bid') or nk_quote.get('price') if nk_quote else 0
                                     # 获取在岸价
                                     jpy_spot = _daily_snapshot.get('jpy_cny_spot') or 0
-                                    # [AI-2026-07-27] 复用统一估值核心：取 T-1 基准(NAV+日元中间价)与 NK 结算价(基准)，NK期货价作单组件
+                                    # [AI-2026-07-27] T-1 基准(NAV+日元在岸价)，日经/TOPIX 共用
                                     t1_row = conn.execute("""
                                         SELECT h.date, h.nav, COALESCE(r.jpy_cny_spot, r.jpy_cny_mid) AS fx_base
                                         FROM unified_fund_history h
@@ -2288,27 +2406,55 @@ class FundService:
                                         WHERE h.fund_code = ? AND h.nav > 0 AND (r.jpy_cny_spot > 0 OR r.jpy_cny_mid > 0)
                                         ORDER BY h.date DESC LIMIT 1
                                     """, (code,)).fetchone()
-                                    nk_base_row = conn.execute(
-                                        "SELECT settle_price FROM futures_daily WHERE symbol='NK' AND settle_price > 0 ORDER BY date DESC LIMIT 1"
-                                    ).fetchone()
-                                    if nk_price > 0 and jpy_spot > 0 and t1_row and nk_base_row:
-                                        nav_base = float(t1_row[1])
-                                        fx_base = float(t1_row[2])
-                                        nk_base = float(nk_base_row[0])
-                                        pos = float(fund.get('pos_ratio', 0.95))
-                                        rt_val = basket_valuation(
-                                            nav_base, pos,
-                                            [{'symbol': 'NKY', 'current_price': nk_price,
-                                              'base_price': nk_base, 'weight': 1.0}],
-                                            fx_base, jpy_spot, hedge=None,
-                                        )
-                                        if rt_val is not None:
-                                            metrics['rt_val'] = round(rt_val, 4)
-                                            if metrics.get('price', 0) > 0:
-                                                metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
-                                            logger.debug(f"[{code}] NK实时估值(备用源): nk={nk_price}, jpy={jpy_spot}, rt_val={rt_val:.4f}")
+                                    _jp_driver = str(fund.get('related_index') or '').strip().upper()
+                                    if _jp_driver == 'TOPIX':
+                                        # 东证TOPIX：新浪 znb_TOPIX 现货（[1]=现价, [9]=昨收；兜底 现价-涨跌额）
+                                        from arbcore.utils.sina_cache import get_sina_quotes
+                                        _raw_tp = (get_sina_quotes(['znb_TOPIX']) or {}).get('znb_TOPIX') or ''
+                                        _tp = _raw_tp.split(',') if _raw_tp else []
+                                        tp_current = float(_tp[1]) if len(_tp) > 1 and _tp[1] else 0.0
+                                        tp_prev = float(_tp[9]) if len(_tp) > 9 and _tp[9] else (
+                                            (tp_current - float(_tp[2])) if len(_tp) > 2 and _tp[2] else 0.0)
+                                        if tp_current > 0 and tp_prev > 0 and jpy_spot > 0 and t1_row:
+                                            nav_base = float(t1_row[1])
+                                            fx_base = float(t1_row[2])
+                                            pos = float(fund.get('pos_ratio', 0.95))
+                                            rt_val = basket_valuation(
+                                                nav_base, pos,
+                                                [{'symbol': 'TOPIX', 'current_price': tp_current,
+                                                  'base_price': tp_prev, 'weight': 1.0}],
+                                                fx_base, jpy_spot, hedge=None,
+                                            )
+                                            if rt_val is not None:
+                                                metrics['rt_val'] = round(rt_val, 4)
+                                                if metrics.get('price', 0) > 0:
+                                                    metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
+                                                logger.debug(f"[{code}] TOPIX实时估值(备用源): tp={tp_current}, jpy={jpy_spot}, rt_val={rt_val:.4f}")
+                                    else:
+                                        # 日经225：NK 期货实时价（hf_NK）
+                                        nk_quote = self.market_data_service.get_realtime_quote('NK') if self.market_data_service else None
+                                        nk_price = nk_quote.get('bid') or nk_quote.get('price') if nk_quote else 0
+                                        nk_base_row = conn.execute(
+                                            "SELECT settle_price FROM futures_daily WHERE symbol='NK' AND settle_price > 0 ORDER BY date DESC LIMIT 1"
+                                        ).fetchone()
+                                        if nk_price > 0 and jpy_spot > 0 and t1_row and nk_base_row:
+                                            nav_base = float(t1_row[1])
+                                            fx_base = float(t1_row[2])
+                                            nk_base = float(nk_base_row[0])
+                                            pos = float(fund.get('pos_ratio', 0.95))
+                                            rt_val = basket_valuation(
+                                                nav_base, pos,
+                                                [{'symbol': 'NKY', 'current_price': nk_price,
+                                                  'base_price': nk_base, 'weight': 1.0}],
+                                                fx_base, jpy_spot, hedge=None,
+                                            )
+                                            if rt_val is not None:
+                                                metrics['rt_val'] = round(rt_val, 4)
+                                                if metrics.get('price', 0) > 0:
+                                                    metrics['rt_premium'] = round((metrics['price'] / rt_val - 1) * 100, 3)
+                                                logger.debug(f"[{code}] NK实时估值(备用源): nk={nk_price}, jpy={jpy_spot}, rt_val={rt_val:.4f}")
                                 except Exception as e:
-                                    logger.warning(f"[{code}] NK实时估值失败: {e}")
+                                    logger.warning(f"[{code}] 实时估值失败: {e}")
 
                             # [AI-2026-10-08] QDII欧洲（513080 法国CAC / 513030·159561 德国DAX）：
                             # 用欧系指数期货做实时估值。与上面的 QDII日本(NK 期货)同构 —— 把
@@ -2565,25 +2711,64 @@ class FundService:
         """
         if datetime.now().hour < 15:
             return
+        # [AI-2026-10-11 东哥拍板] **非交易日（周末/法定假期）直接返回**。
+        # 缺陷：原判据只有 `hour < 15` 一道闸 —— 周末/假期当天 `unified_fund_history` 里
+        #   `date=today AND price IS NULL` 恒成立（休市无行情，永远补不进来），
+        #   而本方法由 `get_unified_dashboard_data()` 每次生成看板数据时调用
+        #   ⇒ 周末/假期**每次看板刷新（约 45s）都 spawn 一个 _step4_fetch_prices 子进程**，
+        #   空转 + 狂刷日志（实测 2026-10-11 周日 20:20~20:24 连刷 7 条「✅ [盘后兜底]」）。
+        # 判据与 daily_updater / main.py 盘后兜底循环同口径：A股交易日历，不可用时退回周末判断。
+        try:
+            from arbcore.utils.market_calendar import is_trading_day as _is_td_fs
+            _fs_today_td = _is_td_fs('A_SHARE', datetime.now().date())
+        except Exception:
+            _fs_today_td = datetime.now().weekday() < 5
+        if not _fs_today_td:
+            return
+        # [AI-2026-10-11 方案A·东哥拍板] 进程内「当日已补齐」记忆：拉齐后**当天不再查 DB**。
+        #   本方法由每次看板刷新调用，原实现每刷新一次就查一次 DB（交易日盘后亦然）。
+        today = datetime.now().strftime('%Y-%m-%d')
+        if getattr(self, '_ensure_close_done_date', None) == today:
+            return
         # [AI-2026-08-26] 非阻塞锁：已有兜底子进程在跑（含 120s 窗口）则本轮跳过
         if not self._ensure_close_lock.acquire(blocking=False):
             logger.debug("[盘后兜底] 已有兜底子进程在跑，跳过本轮")
             return
         try:
-            today = datetime.now().strftime('%Y-%m-%d')
+            # [AI-2026-10-11 方案A] 判据由「count == 0（严格无 NULL）」改为**覆盖率**——
+            #   旧判据下只要当天有任意 1 只基金拿不到价（债券/封闭 LOF 等真·无日K线），
+            #   count 恒 > 0 ⇒ 每次看板刷新都 spawn 子进程空转（实测 10-11 周日 count 恒 = 120）。
+            #   新判据与 main.py `_count_today_close_prices` **完全同口径**：
+            #     covered  = unified_fund_list 中今日 price 非空的只数；
+            #     expected = unified_fund_list 只数 − 其中「真·无日K线」名单(no_kline_funds.json)只数。
             conn = self.db._get_conn()
             try:
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM unified_fund_history WHERE date=? AND price IS NULL",
-                    (today,)
-                ).fetchone()[0]
-                if count == 0:
-                    return
+                _list_codes = {str(r[0]) for r in conn.execute(
+                    "SELECT fund_code FROM unified_fund_list").fetchall() if r[0]}
+                _covered = conn.execute(
+                    "SELECT COUNT(*) FROM unified_fund_history WHERE date=? AND price IS NOT NULL"
+                    " AND fund_code IN (SELECT fund_code FROM unified_fund_list)",
+                    (today,)).fetchone()[0]
             finally:
                 try:
                     conn.close()
                 except:
                     pass
+            _denied = 0
+            try:
+                import json as _json
+                _dl_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        '..', '..', '..', 'arbcore', 'config', 'no_kline_funds.json')
+                if os.path.exists(_dl_path):
+                    with open(_dl_path, 'r', encoding='utf-8') as _f:
+                        _denied = len(set(_json.load(_f).keys()) & _list_codes)
+            except Exception:
+                _denied = 0   # 名单读不了按 0 算（宁多试一次，不误判为"已齐"）
+            _expected = max(len(_list_codes) - _denied, 0)
+            if _expected <= 0 or _covered >= _expected:
+                self._ensure_close_done_date = today   # 已齐 → 当天不再查
+                return
+            count = _expected - _covered               # 仅用于日志展示"尚缺几只"
             # [AI-2026-08-20] 调 daily_updater 写今天收盘价（幂等，已写则跳过）
             import subprocess, os
             scripts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scheduler')
@@ -2597,7 +2782,7 @@ from daily_updater import DailyUpdater
 DailyUpdater()._step4_fetch_prices()
 """
             subprocess.run([python_exe, '-c', code], capture_output=True, timeout=120)
-            logger.info(f"✅ [盘后兜底] 今日收盘价写入完成，共 {count} 只基金")
+            logger.info(f"✅ [盘后兜底] 今日收盘价写入完成（写入前缺 {count} 只；覆盖 {_covered}/{_expected}）")
         except Exception as e:
             logger.warning(f"⚠️ [盘后兜底] 写入今天收盘价失败: {e}")
         finally:
@@ -2621,7 +2806,7 @@ DailyUpdater()._step4_fetch_prices()
             query_hist = """
             SELECT h.date, h.price,
                    h.nav as nav,
-                   h.static_val, h.premium as static_premium, h.calibration,
+                   h.static_val, h.holding_static_val, h.premium as static_premium, h.calibration,
                    h.index_close, h.index_pct, h.shares, h.shares_added, h.trade_volume, h.turnover_rate, h.volume,
                    h.valuation_error,
                    r.usd_cny_mid, r.hkd_cny_mid, r.jpy_cny_mid, r.eur_cny_mid,
@@ -2745,124 +2930,16 @@ DailyUpdater()._step4_fetch_prices()
             # 条件：price/nav/static_val 全为 None → 删除（shares 单独存在无意义）
             df = df.dropna(subset=['price', 'nav', 'static_val'], how='all')
 
-            # [债券ETF] 为现金管理基金回溯计算静态估值
-            if fund_code in BOND_ETF_CODES and not df.empty:
-                try:
-                    bv = get_bond_etf_valuation(conn, None)
-                    fund_meta = BOND_ETF_META.get(fund_code, {})
-                    
-                    if fund_code == '511360':
-                        # ══ 511360: 国债指数跟踪法回溯 ══
-                        treasury_hist = bv.get_treasury_history(days=60)
-                        # 建立日期→涨跌幅映射 (当天close vs 前一天close)
-                        pct_map = {}
-                        for j in range(len(treasury_hist) - 1):
-                            today_close = treasury_hist[j]['close']
-                            yesterday_close = treasury_hist[j + 1]['close']
-                            if yesterday_close > 0:
-                                pct = (today_close / yesterday_close - 1) * 100
-                                pct_map[treasury_hist[j]['date']] = pct
-                        
-                        # 511360 周一计提周末两天利息，需要日均增长做基数
-                        avg_growth_511360 = bv.calc_avg_daily_growth(fund_code, days=20)
-                        # 连续公式参数: 底仓票息 + 国债指数敏感度
-                        daily_coupon_511360 = BOND_ETF_META.get('511360', {}).get('daily_coupon', 0.003)
-                        idx_coeff_511360 = BOND_ETF_META.get('511360', {}).get('idx_coefficient', 0.07)
-
-                        from datetime import datetime as _dt
-                        df_sorted = df.sort_values('date', ascending=True).reset_index(drop=True)
-                        for i in range(len(df_sorted)):
-                            if i == 0:
-                                df_sorted.iloc[i, df_sorted.columns.get_loc('static_val')] = df_sorted.iloc[i]['nav']
-                            else:
-                                prev_nav = df_sorted.iloc[i - 1]['nav']
-                                # 跳过前一日净值缺失的行
-                                if prev_nav is None or pd.isna(prev_nav) or prev_nav <= 0:
-                                    df_sorted.iloc[i, df_sorted.columns.get_loc('static_val')] = None
-                                    continue
-                                
-                                row_date = str(df_sorted.iloc[i]['date'])[:10]
-                                idx_pct = pct_map.get(row_date)
-                                
-                                # 周一：加上周末两天利息 (511360在周一计提)
-                                weekend_bonus = 0.0
-                                try:
-                                    row_dt = _dt.strptime(row_date, '%Y-%m-%d')
-                                    if row_dt.weekday() == 0 and avg_growth_511360 is not None:
-                                        weekend_bonus = avg_growth_511360 * 2
-                                except:
-                                    pass
-
-                                # 连续公式: prev_nav + 底仓票息 + 指数敏感度 × 涨跌幅 + 周末利息
-                                if idx_pct is not None:
-                                    idx_adj = idx_pct * idx_coeff_511360
-                                    estimated_nav = prev_nav + daily_coupon_511360 + idx_adj + weekend_bonus
-                                else:
-                                    estimated_nav = prev_nav + daily_coupon_511360 + weekend_bonus
-                                
-                                df_sorted.iloc[i, df_sorted.columns.get_loc('static_val')] = round(estimated_nav, 4)
-                        
-                        df = df_sorted.sort_values('date', ascending=False).reset_index(drop=True)
-                        logger.info(f"[BondETF] 511360 国债指数跟踪法回溯完成")
-                    else:
-                        # ══ 511880/其他: 日均增长法回溯 ══
-                        avg_growth = bv.calc_avg_daily_growth(fund_code, days=20)
-                        weekend_on = fund_meta.get('weekend_on')
-                        
-                        if avg_growth is not None:
-                            from datetime import datetime as _dt
-                            df_sorted = df.sort_values('date', ascending=True).reset_index(drop=True)
-                            estimated_nav = df_sorted.iloc[0]['nav'] if len(df_sorted) > 0 else latest_nav
-                            
-                            for i in range(len(df_sorted)):
-                                if i == 0:
-                                    df_sorted.iloc[i, df_sorted.columns.get_loc('static_val')] = df_sorted.iloc[i]['nav']
-                                else:
-                                    prev_nav_gen = df_sorted.iloc[i-1]['nav']
-                                    # 跳过前一日净值缺失的行
-                                    if prev_nav_gen is None or pd.isna(prev_nav_gen) or prev_nav_gen <= 0:
-                                        df_sorted.iloc[i, df_sorted.columns.get_loc('static_val')] = None
-                                        continue
-                                    
-                                    try:
-                                        row_dt = _dt.strptime(str(df_sorted.iloc[i]['date'])[:10], '%Y-%m-%d')
-                                    except (ValueError, TypeError):
-                                        row_dt = None
-                                    
-                                    daily_gain = avg_growth
-                                    if row_dt:
-                                        if weekend_on == 'friday' and row_dt.weekday() == 4:
-                                            daily_gain = avg_growth * 3
-                                        elif weekend_on == 'monday' and row_dt.weekday() == 0:
-                                            daily_gain = avg_growth * 3
-                                    
-                                    estimated_nav = prev_nav_gen + daily_gain
-                                    df_sorted.iloc[i, df_sorted.columns.get_loc('static_val')] = round(estimated_nav, 4)
-                            
-                            df = df_sorted.sort_values('date', ascending=False).reset_index(drop=True)
-                            logger.info(f"[BondETF] 静态估值回溯完成 {fund_code}, 日均增长={avg_growth}")
-                except Exception as e:
-                    logger.warning(f"[BondETF] 静态估值回溯失败 {fund_code}: {e}")
+            # [债券ETF] 为现金管理基金回溯计算静态估值 —— [AI-2026-10-11 东哥拍板]
+            #   整块移除：债券/货币 ETF 估值已迁 ETFarb（2026-09-18）；LOFarb「现金管理」分类已空
+            #   ⇒ `if fund_code in BOND_ETF_CODES` 恒 False，属死代码（含 511360 国债指数跟踪法 /
+            #   511880 日均增长法两条回溯分支，共约 98 行）。原实现见 _deprecated/bond_etf_valuation.py。
 
             # 2. 构建返回数据
             import math
             
-            # [511360] 获取国债指数历史数据，附加到每行
-            treasury_map = {}
-            if fund_code == '511360':
-                try:
-                    bv2 = get_bond_etf_valuation(conn, None)
-                    treasury_hist = bv2.get_treasury_history(days=60)
-                    for j in range(len(treasury_hist) - 1):
-                        today_close = treasury_hist[j]['close']
-                        yesterday_close = treasury_hist[j + 1]['close']
-                        pct = (today_close / yesterday_close - 1) * 100 if yesterday_close > 0 else 0
-                        treasury_map[treasury_hist[j]['date']] = {
-                            'idx_close': today_close,
-                            'idx_pct': round(pct, 4),
-                        }
-                except Exception as e:
-                    logger.warning(f"[BondETF] 获取000012历史数据失败: {e}")
+            # [511360] 国债指数历史 —— [AI-2026-10-11] 已随 bond_etf_valuation 一并移除（迁 ETFarb）。
+            #   保留空 dict 供下游消费者（行为与原一致：511360 本就不在 LOFarb 基金列表 ⇒ 原就不填充）。
             
             # [511520] 获取国债期货历史数据，附加到每行
             futures_map = {}
@@ -2907,26 +2984,30 @@ DailyUpdater()._step4_fetch_prices()
                 except Exception as e:
                     logger.warning(f"[BondETF] 获取国债期货历史数据失败: {e}")
 
-            # [AI-2026-08-21] 白银基金：获取 AG0 结算价历史，供历史弹窗"结算价"列
-            # 结算价是白银估值分母，来自 futures_daily.symbol='AG0'（DB 权威，不回填不兜底）
-            ag0_settle_map = {}
+            # [AI-2026-08-21 → 2026-10-11 泛化] 期货结算价历史，供历史弹窗"结算价"列
+            #   161226 ← AG0（沪银连续，上期所）；159985 ← M0（豆粕连续，大商所，东哥 10-11 补）。
+            #   结算价是期货估值分母，来自 futures_daily（DB 权威，不回填不兜底）。
+            #   按 fund_code 映射符号（不能按 category：白银/豆粕同属「商品」，会互相错挂）。
+            settle_maps = {}   # { 'ag0_settle'|'m0_settle' : {date: {'settle':..,'chg':..}} }
             try:
-                _cat_row = conn.execute("SELECT category FROM unified_fund_list WHERE fund_code=?", (fund_code,)).fetchone()
-                _cat = _cat_row[0] if _cat_row else ''
-                if _cat == '白银':
-                    _ag0_rows = conn.execute(
-                        "SELECT date, settle_price FROM futures_daily WHERE symbol='AG0' AND settle_price IS NOT NULL AND settle_price>0 ORDER BY date DESC"
+                _fut_sym = 'AG0' if fund_code == '161226' else ('M0' if fund_code == '159985' else '')
+                if _fut_sym:
+                    _frows = conn.execute(
+                        "SELECT date, settle_price FROM futures_daily WHERE symbol=? AND settle_price IS NOT NULL AND settle_price>0 ORDER BY date DESC",
+                        (_fut_sym,)
                     ).fetchall()
-                    _prices = {r[0]: r[1] for r in _ag0_rows}
+                    _prices = {r[0]: r[1] for r in _frows}
                     _ds = sorted(_prices.keys(), reverse=True)
+                    _m = {}
                     for i in range(len(_ds) - 1):
                         _dc, _dp = _ds[i], _ds[i + 1]
                         if _prices[_dp] and _prices[_dp] > 0 and _prices[_dc] and _prices[_dc] > 0:
-                            ag0_settle_map[_dc] = {'settle': _prices[_dc], 'chg': round((_prices[_dc] / _prices[_dp] - 1) * 100, 4)}
+                            _m[_dc] = {'settle': _prices[_dc], 'chg': round((_prices[_dc] / _prices[_dp] - 1) * 100, 4)}
                     if _ds:
-                        ag0_settle_map[_ds[-1]] = {'settle': _prices[_ds[-1]], 'chg': None}
+                        _m[_ds[-1]] = {'settle': _prices[_ds[-1]], 'chg': None}
+                    settle_maps['ag0_settle' if _fut_sym == 'AG0' else 'm0_settle'] = _m
             except Exception as e:
-                logger.warning(f"[FundHistory] 获取AG0结算价失败 {fund_code}: {e}")
+                logger.warning(f"[FundHistory] 获取期货结算价失败 {fund_code}: {e}")
 
             # [AI-2026-07-21] 获取该基金跟踪的ETF历史价格
             # 单主ETF基金（如162411→XOP）显示净值（netvalue），列名"XOP净值"
@@ -3049,6 +3130,11 @@ DailyUpdater()._step4_fetch_prices()
                 except Exception as e:
                     logger.warning(f"[FundHistory] usa_netvalue_map 构建失败 {yaml_trade_etf}: {e}")
 
+            # [AI-2026-10-11] 511360 国债指数映射 —— 原由已删除的 bond_etf_valuation 块填充；
+            #   删块时漏留本行定义 ⇒ NameError（仅 `fund_code == '511360'` 路径可达，
+            #   LOFarb 无此基金故未爆；但属未定义名隐患）。保留空 dict = 与"本就不填充"行为一致。
+            treasury_map = {}
+
             data_list = []
             for _, row in df.iterrows():
                 item = {}
@@ -3103,7 +3189,9 @@ DailyUpdater()._step4_fetch_prices()
                         item['futures_pct'] = fut_data['futures_pct']
 
                     # 回测: 用前一日NAV + 日均票息 + T2609方向修正 → 预估今日NAV
-                    daily_coupon = BOND_ETF_META.get('511520', {}).get('daily_coupon', 0.0082)
+                    # [AI-2026-10-11] BOND_ETF_META 已随 bond_etf_valuation 移除（迁 ETFarb）⇒
+                    #   就地取原默认值 0.0082（本分支由 `fund_code == '511520'` 守卫，LOFarb 无此基金）。
+                    daily_coupon = 0.0082
                     t_pct = fut_data.get('futures_pct') if fut_data else None
                     if len(data_list) > 0 and t_pct is not None:
                         prev_item = data_list[-1]
@@ -3127,13 +3215,15 @@ DailyUpdater()._step4_fetch_prices()
                             if w is not None:
                                 item[f'{etf_sym}_weight'] = round(w, 4)
 
-                # [AI-2026-08-21] 白银：附加 AG0 结算价（历史弹窗"结算价"列）
-                if ag0_settle_map:
+                # [AI-2026-08-21 → 2026-10-11 泛化] 期货：附加结算价（历史弹窗"结算价"列）
+                #   161226 → ag0_settle；159985 → m0_settle（前端两列二选一显示）
+                if settle_maps:
                     row_date = str(item.get('date', ''))[:10]
-                    _ag0 = ag0_settle_map.get(row_date)
-                    if _ag0:
-                        item['ag0_settle'] = _ag0['settle']
-                        item['ag0_settle_chg'] = _ag0['chg']
+                    for _k, _mp in settle_maps.items():
+                        _sv = _mp.get(row_date)
+                        if _sv:
+                            item[_k] = _sv['settle']
+                            item[_k + '_chg'] = _sv['chg']
 
                 item['is_single_etf'] = is_single_etf
                 data_list.append(item)
@@ -3245,7 +3335,10 @@ DailyUpdater()._step4_fetch_prices()
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT fund_name, related_index, pos_ratio FROM unified_fund_list WHERE fund_code=?",
+                # [AI-2026-10-11 修] 补 category 列：原 SELECT 仅 3 列，而下方 fund_cfg 取 f_row[3] 当 category，
+                #   列不存在 → 三元恒走 else ''，导致 valuation_meta.fund_config.category 永远空串；
+                #   前端「估值算法」按品类分支（东哥要求）在「实时估值页」场景拿不到品类。
+                "SELECT fund_name, related_index, pos_ratio, category FROM unified_fund_list WHERE fund_code=?",
                 (code,)
             )
             f_row = cursor.fetchone()
@@ -3387,8 +3480,11 @@ DailyUpdater()._step4_fetch_prices()
             future_quote = None
             if future_symbol:
                 # [AI-2026-07-02] AG0 沪银期货：优先从东财 SSE + 新浪获取实时数据
+                # [AI-2026-10-11] M0 豆粕期货：新浪 nf_M0（东财无 DCE 通道）
                 if future_symbol == 'AG0':
                     future_quote = _get_ag0_future_quote()
+                elif future_symbol == 'M0':
+                    future_quote = _get_m0_future_quote()
                 else:
                     try:
                         q = self.market_data_service.get_realtime_quote(future_symbol) if self.market_data_service else None
@@ -3404,6 +3500,19 @@ DailyUpdater()._step4_fetch_prices()
                     except Exception as e:
                         logger.error(f"Error getting future quote for {future_symbol}: {e}")
                         future_quote = None
+                # [AI-2026-10-11 东哥要求] 附加期货「虚拟持仓」展示元数据（只加不改，不影响既有 price/settlement 语义）：
+                #   name=中文名、session_open=是否交易时段、official_close=官方收盘价（供前端休市时用收盘口径显示，
+                #   与主看板「实时成交价」一致，禁止拿陈旧盘中快照冒充）。仅 AG0/M0（自有可控数据源）注入。
+                if future_quote is not None and future_symbol in ('AG0', 'M0'):
+                    future_quote['name'] = _FUTURES_DISPLAY_NAMES.get(future_symbol, '')
+                    try:
+                        future_quote['session_open'] = _futures_session_open(future_symbol)
+                        _ftoday = datetime.now().strftime('%Y-%m-%d')
+                        # 官方收盘价（休市时前端「实时价」列用）+ 当日结算价（「当日VWAP」列休市口径用）
+                        future_quote['official_close'] = _get_futures_official_price(conn, future_symbol, _ftoday, 'close_price')
+                        future_quote['official_settle'] = _get_futures_official_price(conn, future_symbol, _ftoday, 'settle_price')
+                    except Exception as _ef:
+                        logger.debug(f"[{code}] 期货展示元数据注入失败: {_ef}")
 
             # 获取 T-1 基准估值日数据
             t1_data = {}
@@ -3564,27 +3673,10 @@ DailyUpdater()._step4_fetch_prices()
                 except Exception:
                     pass
 
-            # [债券ETF] 为现金管理基金添加额外估值信息
+            # [债券ETF] —— [AI-2026-10-11] 已随 bond_etf_valuation 一并移除（迁 ETFarb）。
+            #   ⚠️ 本行必须保留：下方 result 字典用 `**bond_extra` 展开它。
+            #      （删块时曾漏掉本行 ⇒ NameError: bond_extra，导致基金详情整页 500，2026-10-11 已修）
             bond_extra = {}
-            if code in BOND_ETF_CODES:
-                try:
-                    bv = get_bond_etf_valuation(conn, self.market_data_service)
-                    val = bv.get_valuation(code)
-                    bond_extra = {
-                        "avg_daily_growth": val.get('avg_daily_growth'),
-                        "bond_etf_method": val.get('method', ''),
-                        "treasury_index_pct": val.get('treasury_index_pct'),
-                        "estimated_nav": val.get('estimated_nav'),
-                        "latest_nav": val.get('latest_nav'),
-                        "latest_nav_date": val.get('latest_nav_date'),
-                        # 国债期货数据 (511520专用)
-                        "futures_pct": val.get('futures_pct'),
-                        "tf_pct": val.get('tf_pct'),
-                        "futures_adjustment": val.get('futures_adjustment'),
-                        "total_adjustment": val.get('total_adjustment'),
-                    }
-                except Exception as e:
-                    logger.error(f"[BondETF] 估值元数据获取失败 {code}: {e}")
             
             # [AI-2026-10-07] 持仓中文名（纯展示；抓取失败为 {}，前端只显示代码）
             _hold_syms = [(it.get('symbol') or '') for it in (fund_cfg.get('valuation_portfolio') or fund_cfg.get('hedging_portfolio') or [])]

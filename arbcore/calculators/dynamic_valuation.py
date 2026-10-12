@@ -93,8 +93,10 @@ class DynamicValuationCalculator:
             else:
                 base_row['exchange_rate'] = None
 
-            # ── 第二步：美股 ETF 基准日校验（仅 QDII欧美/黄金原油/白银/混合跨境）
-            us_categories = {'黄金原油', 'QDII欧美', '混合跨境', '白银'}
+            # ── 第二步：美股 ETF 基准日校验（仅 QDII欧美/黄金原油/商品/混合跨境）
+            # [AI-2026-10-11 东哥定调] 分类「白银」已并入「商品」（161226 白银 + 159985 豆粕）。
+            #   二者 related_index 均为空 ⇒ 本块对它们本就是 no-op，改动仅为保持白名单与 DB 分类一致。
+            us_categories = {'黄金原油', 'QDII欧美', '混合跨境', '商品'}
             if category in us_categories:
                 # 先尝试从 fund_basket_weights 获取 ETF 代码，缺失则补充用 related_index
                 etf_syms = pd.read_sql(

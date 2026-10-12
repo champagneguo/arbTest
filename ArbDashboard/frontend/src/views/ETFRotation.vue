@@ -400,7 +400,7 @@ onUnmounted(() => {
 .fx-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
 .fx-item { display: flex; align-items: center; gap: 8px; }
 .fx-label { font-size: 12px; color: #0369a1; font-weight: 600; }
-.fx-value { font-size: 20px; font-weight: 800; color: #1e293b; font-family: 'Consolas', monospace; }
+.fx-value { font-size: 20px; font-weight: 800; color: #1e293b; /* [AI-2026-10-12 重做 字体统一token] Consolas/monospace 旧栈 → var(--co-font-mono) */ font-family: var(--co-font-mono); }
 .fx-time { font-size: 11px; color: #94a3b8; }
 
 .main-card { border-radius: 8px; }
@@ -440,22 +440,25 @@ onUnmounted(() => {
 
 .tab-content { padding: 0; }
 
-.rotation-table :deep(td.mono) { font-family: 'Consolas', monospace; font-weight: 600; font-size: 13px; }
+/* [AI-2026-10-12 重做 字体统一token] Consolas/monospace 旧栈 → var(--co-font-mono) */
+.rotation-table :deep(td.mono) { font-family: var(--co-font-mono); font-weight: 600; font-size: 13px; }
 
 .history-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
 .history-loading, .history-empty { text-align: center; padding: 40px; color: #94a3b8; }
 .history-table-wrap { max-height: 500px; overflow-y: auto; }
 .history-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .history-table th {
-  background: #f8fafc; padding: 10px 12px; text-align: center;
-  color: #64748b; border-bottom: 2px solid #e2e8f0; font-weight: 600;
+  /* [AI-2026-10-12 重做 表头统一蓝底/文字] 背景 #f8fafc→#edf3fb、文字 #64748b→#33629c（padding 10px 12px 与 sticky 不变） */
+  background: #edf3fb; padding: 10px 12px; text-align: center;
+  color: #33629c; border-bottom: 2px solid #e2e8f0; font-weight: 600;
   position: sticky; top: 0; z-index: 10;
 }
 .history-table td { padding: 10px 12px; text-align: center; border-bottom: 1px solid #e2e8f0; }
 .history-table tr:hover td { background: #f0f7ff; }
 .history-table .date-cell { background: #fef3c7; font-weight: bold; vertical-align: top; padding-top: 14px; }
 
-.mono { font-family: 'Consolas', monospace; }
+/* [AI-2026-10-12 重做 字体统一token] Consolas/monospace 旧栈 → var(--co-font-mono) */
+.mono { font-family: var(--co-font-mono); }
 .up { color: #dc2626; font-weight: bold; }
 .down { color: #16a34a; font-weight: bold; }
 </style>

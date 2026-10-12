@@ -149,10 +149,11 @@ const columns: DataTableColumns<DashboardRow> = [
   },
   {
     // [AI-2026-10-10] 主看板列 3「名称」：cleanFundName + ellipsis tooltip，列宽 130 对齐主看板
+    // [AI-2026-10-12 重做 名称列左对齐] align center→left（与主看板名称列一致；宽度 130 不变）
     title: '名称',
     key: 'fund_name',
     width: 130,
-    align: 'center',
+    align: 'left',
     ellipsis: { tooltip: true },
     render(row) {
       return h('span', {}, cleanFundName(row.fund_name))
@@ -339,7 +340,8 @@ const rowProps = (row: DashboardRow) => ({
 
 /* [AI-2026-10-10] 代码小字（.code-cell）：对齐主看板代码列 NText code 样式 */
 .code-cell {
-  font-family: "Fira Code", Consolas, monospace;
+  /* [AI-2026-10-12 重做 字体统一token] Fira Code/Consolas/monospace 旧栈 → var(--co-font-mono) */
+  font-family: var(--co-font-mono);
   font-size: 12px;
   font-weight: 700;
   color: #1f2937;
@@ -348,7 +350,8 @@ const rowProps = (row: DashboardRow) => ({
 .date-cell { font-size: 11px; color: #64748b; }
 /* 数值单元格（.num-cell）及修饰类 .strong/.muted/.compact */
 .num-cell {
-  font-family: "Inter", "Fira Code", Consolas, sans-serif;
+  /* [AI-2026-10-12 重做 字体统一token] Inter/Fira Code/Consolas/sans 旧栈 → var(--co-font-sans) */
+  font-family: var(--co-font-sans);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   color: #1f2937;
@@ -359,9 +362,10 @@ const rowProps = (row: DashboardRow) => ({
 /* 状态小标签（.status-pill，保留以对齐主看板） */
 .status-pill { font-size: 10px; padding-inline: 5px !important; }
 /* 列头居中（对齐主看板 .col-title-wrapper） */
+/* [AI-2026-10-12 重做 表头统一蓝底/文字] 背景 #eef5ff→#edf3fb、文字 #21395c→#33629c */
 :deep(.n-data-table-th) {
-  background-color: #eef5ff !important;
-  color: #21395c !important;
+  background-color: #edf3fb !important;
+  color: #33629c !important;
   font-size: 12px;
   font-weight: 800 !important;
   border-bottom: 1px solid #dfe8f4 !important;

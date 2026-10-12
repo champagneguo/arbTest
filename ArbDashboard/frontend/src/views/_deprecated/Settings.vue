@@ -741,8 +741,9 @@ onMounted(() => {
   white-space: nowrap;
 }
 .inv-table thead th {
-  background: linear-gradient(180deg, #374151 0%, #1f2937 100%);
-  color: #fff;
+  /* [AI-2026-10-12 重做 表头统一蓝底/文字] 深色渐变 #374151→#1f2937 替换为平铺 #edf3fb、文字 #fff→#33629c（sticky/zebra/hover/padding 不变） */
+  background: #edf3fb;
+  color: #33629c;
   position: sticky;
   top: 0;
   z-index: 2;
@@ -755,7 +756,8 @@ onMounted(() => {
 .inv-table tbody tr:nth-child(even) { background: #f9fafb; }
 .inv-table tbody tr:hover { background: #eff6ff !important; }
 .inv-code {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  /* [AI-2026-10-12 重做 字体统一token] JetBrains Mono/Fira Code/monospace 旧栈 → var(--co-font-mono) */
+  font-family: var(--co-font-mono);
   font-weight: 600;
   white-space: nowrap;
   color: #1e293b;

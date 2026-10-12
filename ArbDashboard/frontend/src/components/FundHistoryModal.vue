@@ -5,7 +5,8 @@
     <div class="history-modal-body">
       <n-tabs v-model:value="historyView" type="segment" size="small" style="margin-bottom: 10px;">
         <!-- [AI-2026-10-08 东哥拍板] TAB 名随内容改：表已换成带实时价的持仓表 -->
-        <n-tab-pane name="detail" tab="持仓估值" />
+        <!-- [AI-2026-10-12 重做] tab 文案「持仓估值」→「模拟持仓估值」（旧 dist 逐字） -->
+        <n-tab-pane name="detail" tab="模拟持仓估值" />
         <n-tab-pane name="error" tab="历史误差" />
       </n-tabs>
 
@@ -36,18 +37,20 @@
 
         <!-- 持仓实时估值（2026-10-08 东哥拍板：替换原「估值明细」表）
              数据源 = useValuationCalculator.holdingRows（valuation_meta 现成字段，含 realtime_quotes），
-             表格 = 共享组件 RtHoldingTable，与「实时估值」页那张表**同一个组件**（格式/配色永不走偏）。 -->
+             表格 = 共享组件 RtHoldingTable，与「实时估值」页那张表**同一个组件**（格式/配色永不走偏）。
+             [AI-2026-10-12 重做] hint 分子「实时价」→「实时成交价」（旧 dist 逐字，与组件默认一致）。 -->
         <RtHoldingTable
           :rows="rtHoldingRows"
           title="持仓实时估值"
-          hint="盘中涨跌 = 实时价 ÷ T-1收盘 − 1 · 估值影响 = 占比 × 盘中涨跌"
+          hint="盘中涨跌 = 实时成交价 ÷ T-1收盘 − 1 · 估值影响 = 占比 × 盘中涨跌"
           show-empty
         />
 
-        <!-- 估值算法：直接展示公式（不折叠，单行紧凑） -->
+        <!-- 估值算法：直接展示公式（不折叠，单行紧凑）
+             [AI-2026-10-12 重做] 硬编码静态串 → algoFormula computed（商品/QDII日本/其他三元分支，旧 dist 逐字） -->
         <div class="hd-algo">
           <span class="hd-algo-title">估值算法</span>
-          <span class="hd-algo-body">静态估值 = 基准日净值 × ( 1 + Σᵢ 占净值ᵢ × 人民币口径涨跌ᵢ )，其中 人民币口径涨跌ᵢ = ( 1 + 标的涨跌ᵢ ) × ( 1 + 汇率涨跌ᵢ ) − 1</span>
+          <span class="hd-algo-body">{{ algoFormula }}</span>
         </div>
 
         <!-- [AI-2026-10-07 方案A·东哥拍板] 补采=应急入口，收进维护折叠，平时不挡眼 -->
@@ -63,7 +66,9 @@
 
       <!-- 视图B：历史误差（极简四列，每页15天） -->
       <div v-else>
+        <!-- [AI-2026-10-12 重做 统一字体/表头] 历史误差表挂紧凑样式 class：行距对齐 RtHoldingTable 的 3px 8px 口径 -->
         <n-data-table
+          class="hist-compact"
           :columns="errorColumns"
           :data="pagedErrorRows"
           size="small"
@@ -87,7 +92,8 @@
 
   <!-- 视图B 行点击：某日各持仓股变动弹窗 -->
   <n-modal v-model:show="showDayModal" preset="card" :title="`估值标的变动 · ${dayDetailRow?.date || ''}`" style="width: 70vw; max-width: 900px;">
-    <n-data-table v-if="dayDetailRow" :columns="dayHoldColumns" :data="dayHoldRows" size="small" bordered :row-key="(r: any) => r.sym" style="width: 100%;" />
+    <!-- [AI-2026-10-12 重做 统一字体/表头] 日明细弹窗表挂同一紧凑样式 class（scoped :deep，不外泄其他页面） -->
+    <n-data-table v-if="dayDetailRow" class="hist-compact" :columns="dayHoldColumns" :data="dayHoldRows" size="small" bordered :row-key="(r: any) => r.sym" style="width: 100%;" />
   </n-modal>
 </template>
 
@@ -209,6 +215,21 @@ const rtHoldingRows = computed<any[]>(() => {
     vc.fetchValuationMeta()
   }
   return vc.holdingRows.value as any[]
+})
+
+// [AI-2026-10-12 重做] 估值算法公式三元分支（旧 dist 逐字）：商品(或 valuation_method=futures) / QDII日本 / 其他。
+// category 看板行优先、valuation_meta.fund_config 兜底；method 取 fund_config.valuation_method；
+// else 分支 = 原 L50 硬编码静态公式原文，逐字保留。
+const algoFormula = computed(() => {
+  const cat = String(fundRow.value?.category || vc.meta.value?.fund_config?.category || '')
+  const method = String(vc.meta.value?.fund_config?.valuation_method || '')
+  if (cat === '商品' || method === 'futures') {
+    return '参考估值 = 基准日净值 × ( 实时成交价 ÷ 昨结算价 )（收盘后分子用收盘价）；官方估值 = 基准日净值 × ( 当日VWAP ÷ 昨结算价 )（收盘后分子用当日结算价）'
+  }
+  if (cat === 'QDII日本') {
+    return '参考估值 = 基准日净值 × ( 1 + 占净值 × ( NK期货实时 ÷ NK基准 × 日元 ÷ 日元基准 − 1 ) )；官方估值 = 基准日净值 × ( 1 + 占净值 × ( 日经225涨跌 × 日元汇率涨跌 − 1 ) )'
+  }
+  return '静态估值 = 基准日净值 × ( 1 + Σᵢ 占净值ᵢ × 人民币口径涨跌ᵢ )，其中 人民币口径涨跌ᵢ = ( 1 + 标的涨跌ᵢ ) × ( 1 + 汇率涨跌ᵢ ) − 1'
 })
 
 // 视图B：历史误差四列（日期/净值/估值/误差），每页15天（东哥拍板 2026-10-07）
@@ -464,9 +485,17 @@ const reconcileStaticValHandler = async () => {
 }
 /* 表格数值单元格：n-data-table render 函数元素带本组件 scopeId，scoped 可命中 */
 .num-cell {
-  font-family: "Inter", "Fira Code", Consolas, sans-serif;
-  font-size: 13px;
+  /* [AI-2026-10-12 重做 统一字体/表头] 数字单元改引用 sans 字体 token（原硬编码 Inter/FiraCode 栈废弃） */
+  font-family: var(--co-font-sans);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: #1f2937;
+}
+/* [AI-2026-10-12 重做 统一字体/表头] 历史误差/日明细两表行距紧凑（A5：padding/font-size/line-height 三者均必填，
+   对齐参照表 RtHoldingTable 的 3px 8px；scoped :deep 只作用于本组件内带 class 的表，不泄漏到其他页面） */
+.hist-compact :deep(th), .hist-compact :deep(td) {
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>

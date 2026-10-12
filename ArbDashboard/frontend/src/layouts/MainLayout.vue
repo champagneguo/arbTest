@@ -239,7 +239,9 @@ const menuOptions = [
   //   两者均为交易台能力（规则引擎 / 套利账本），按目标架构已归属 LOFTrader(:5174)，
   //   不应出现在 LOFarb(数据/估值/看板)。路由与页面保留未删（后端端点仍供 LOFTrader 透传调用），
   //   仅移除 LOFarb 侧边栏暴露的入口，求稳可逆。
-  // [AI-2026-10-10] 「原油穿透」菜单项上移到「ETF轮动」之前，顺序 = 套利看板 / 原油穿透 / ETF轮动 / 系统配置
+  // [AI-2026-10-10] 「原油穿透」菜单项上移到「ETF轮动」之前，顺序 = 套利看板 / 原油穿透 / ETF轮动
+  // [AI-2026-10-12 重做] 删除「系统配置」侧边栏入口：Settings.vue 已随 10-11 UI 改造归档
+  //   （views/_deprecated/），/settings 路由一并移除（10-11 23:46 dist 实测菜单仅 3 项、系统配置=0）。
   {
     label: () => h(RouterLink, { to: '/penetration' }, { default: () => '原油穿透' }),
     key: 'penetration'
@@ -247,10 +249,6 @@ const menuOptions = [
   {
     label: () => h(RouterLink, { to: '/etf-rotation' }, { default: () => 'ETF轮动' }),
     key: 'etf-rotation'
-  },
-  {
-    label: () => h(RouterLink, { to: '/settings' }, { default: () => '系统配置' }),
-    key: 'settings'
   }
   // [AI-2026-10-09 东哥拍板] 「后台维护」整页迁至 LOFTrader(:5174)：
   //   导出 / 补采 / 重算 属**人工运维交互**，只有本机跑得起来，ARM 展示副本上无意义。
@@ -284,7 +282,8 @@ const menuOptions = [
 .side-log-time {
   color: var(--co-text-3);
   flex-shrink: 0;
-  font-family: "Fira Code", Consolas, monospace;
+  /* [AI-2026-10-12 重做 统一字体/表头] 侧栏日志时间统一引用 mono 字体 token */
+  font-family: var(--co-font-mono);
   font-size: 9px;
   padding-top: 1px;
 }

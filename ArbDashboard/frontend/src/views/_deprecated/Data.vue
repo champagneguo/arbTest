@@ -829,9 +829,11 @@ onMounted(() => {
 .inv-table-wrap { max-height: 62vh; overflow: auto; border: 1px solid #edf2f7; border-radius: 8px; }
 .inv-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 .inv-table th, .inv-table td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; vertical-align: top; }
-.inv-table thead th { background: #2c3e50; color: #fff; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
+/* [AI-2026-10-12 重做 表头统一蓝底/文字] 背景 #2c3e50→#edf3fb、文字 #fff→#33629c（sticky 定位与 zebra #fafafa 不变） */
+.inv-table thead th { background: #edf3fb; color: #33629c; position: sticky; top: 0; z-index: 1; white-space: nowrap; }
 .inv-table tbody tr:nth-child(even) { background: #fafafa; }
-.inv-code { font-family: monospace; font-weight: 600; white-space: nowrap; color: #1e293b; }
+/* [AI-2026-10-12 重做 字体统一token] 裸 monospace → var(--co-font-mono) */
+.inv-code { font-family: var(--co-font-mono); font-weight: 600; white-space: nowrap; color: #1e293b; }
 .inv-tag { background: #3498db; color: #fff; padding: 2px 7px; border-radius: 3px; font-size: 12px; white-space: nowrap; }
 .inv-algo { font-weight: 600; color: #1e293b; }
 .inv-sub { font-size: 11px; color: #94a3b8; margin-top: 2px; line-height: 1.5; }

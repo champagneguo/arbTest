@@ -40,6 +40,7 @@ const displayText = computed(() => {
 <style scoped>
 .premium-tag {
   font-weight: 700;
-  font-family: 'Courier New', monospace;
+  /* [AI-2026-10-12 重做 统一字体/表头] 溢价标签统一引用 mono 字体 token */
+  font-family: var(--co-font-mono);
 }
 </style>

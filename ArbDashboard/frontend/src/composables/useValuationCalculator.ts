@@ -160,7 +160,8 @@ export function useValuationCalculator() {
     // 内部指数合成代码（DB 篮子权威 znb_*）：NKY=日经→日本，DAX=德→欧洲
     if (/\.T$/.test(clean) || clean.includes('NKY')) return '日本'
     if (clean.includes('DAX') || clean.includes('CAC') || clean.includes('FTSE')) return '欧洲'
-    if (/^(MGC|MCL|MES|MNQ|GC|CL|SI|HG|ES|NQ|NK|AG\d*)$/.test(clean)) return '期货'
+    // [AI-2026-10-12 重做] NK| 与 AG\d* 之间插入 M\d+|：覆盖豆粕等 DCE「M+数字」期货代码（M0/M2501…），旧 dist 逐字
+    if (/^(MGC|MCL|MES|MNQ|GC|CL|SI|HG|ES|NQ|NK|M\d+|AG\d*)$/.test(clean)) return '期货'
     if (/^(SH|SZ)\d{6}$/.test(clean)) return 'A股'
     if (/^\d{5}$/.test(clean)) return '香港'
     if (/^\d{6}$/.test(clean)) return 'A股'
@@ -186,7 +187,29 @@ export function useValuationCalculator() {
    * 取代原 baseEtfsText / realtimeEtfsText 两段内联文本（信息密度低且易混淆）。
    * 数据全部来自 valuation_meta 现成字段（中文名来自 meta.holding_names，后端腾讯批量抓）。
    */
-  const holdingRows = computed(() => {
+  // [AI-2026-10-12 重做] holdingRows 行类型：ETF 篮子 normal 行 + 商品期货 futures fallback 行共用，
+  // futures 行额外带 isFutures/settle/vwap（RtHoldingTable 据 r.isFutures 分支渲染 9 列 vs 10 列）。
+  interface HoldingRow {
+    symbol: string
+    name: string
+    market: string
+    mktClass: string
+    weight: number
+    t2: number | null
+    t1: number | null
+    t1Chg: number | null
+    rt: number | null
+    rtChg: number | null
+    impact: number | null
+    /** 商品期货 futures fallback 行标记（normal 行不带该字段） */
+    isFutures?: boolean
+    /** 昨结算价（futures 行盘中涨跌分母；取不到 = null，禁兜底） */
+    settle?: number | null
+    /** 当日VWAP（futures 行；休市口径回退 official_settle；取不到 = null） */
+    vwap?: number | null
+  }
+
+  const holdingRows = computed<HoldingRow[]>(() => {
     if (!meta.value) return []
     const cfg = meta.value.fund_config || {}
     const bd = meta.value.base_data || {}
@@ -199,7 +222,7 @@ export function useValuationCalculator() {
     }
     const vp = cfg.valuation_portfolio
     const portfolio: any[] = vp && vp.length > 0 ? vp : cfg.hedging_portfolio || []
-    const rows: any[] = []
+    const rows: HoldingRow[] = []
     for (const item of portfolio) {
       const raw = item.symbol || ''
       if (!raw) continue
@@ -218,7 +241,8 @@ export function useValuationCalculator() {
       const t1p = t1info && Number(t1info.price) > 0 ? Number(t1info.price) : null
       const quote = rq[raw] || rq[clean] || rq[display] || null
       const rt = quote && quote.price && Number(quote.price) > 0 ? Number(quote.price) : null
-      // 盘中涨跌 = 实时价 ÷ T-1收盘 − 1（行情源缺数时为 null，显示 '-'）
+      // [AI-2026-10-12 重做] 分子文案对齐旧 dist：实时价 → 实时成交价（缺数仍为 null，显示 '-'，不兜底）
+      // 盘中涨跌 = 实时成交价 ÷ T-1收盘 − 1（行情源缺数时为 null，显示 '-'）
       const rtChg = rt !== null && t1p !== null ? (rt / t1p - 1) * 100 : null
       // 估值影响 = 占比 × 盘中涨跌（对该基金净值贡献的百分点）
       const impact = rtChg !== null ? (Number(item.weight) * rtChg) / 100 : null
@@ -235,6 +259,36 @@ export function useValuationCalculator() {
         rtChg,
         impact,
       })
+    }
+    // [AI-2026-10-12 重做] 商品期货 futures fallback（旧 dist 逐字）：篮子为空且 trade_future 有
+    // future_quote 有效价（price/official_close/settlement 任一 >0）时补一条 100% 期货持仓行。
+    // 无数据一律 null（SUPREME 禁兜底）：rt 盘中取实时价、休市取官方收盘；settle=昨结算；vwap 同口径回退 official_settle。
+    if (rows.length === 0) {
+      const futSym = String(cfg.trade_future || '').trim()
+      const fq = meta.value.future_quote
+      if (futSym && fq && (Number(fq.price) > 0 || Number(fq.official_close) > 0 || Number(fq.settlement) > 0)) {
+        const price = Number(fq.price) > 0 ? Number(fq.price) : null
+        const close = Number(fq.official_close) > 0 ? Number(fq.official_close) : null
+        const rt = fq.session_open ? (price ?? close) : (close ?? price)
+        const settle = Number(fq.settlement) > 0 ? Number(fq.settlement) : null
+        const vwapRaw = Number(fq.vwap) > 0 ? Number(fq.vwap) : null
+        const officialSettle = Number(fq.official_settle) > 0 ? Number(fq.official_settle) : null
+        const vwap = fq.session_open ? (vwapRaw ?? officialSettle) : (officialSettle ?? vwapRaw)
+        const rtChg = rt !== null && settle !== null ? (rt / settle - 1) * 100 : null
+        rows.push({
+          symbol: futSym,
+          name: fq.name || names[futSym] || '',
+          market: '期货',
+          mktClass: 'mkt-ft',
+          weight: 100,
+          isFutures: true,
+          rt, rtChg, settle, vwap,
+          impact: rtChg,
+          t1: settle,
+          t1Chg: null,
+          t2: null,
+        })
+      }
     }
     return rows
   })

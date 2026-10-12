@@ -59,12 +59,33 @@ except ImportError:
 _IB_READER_INSTANCE = None
 _ORIG_THREAD_EXCEPTHOOK = None
 
+def _raised_inside_ibapi(exc_tb) -> bool:
+    # [AI-2026-10-11] 判据由「线程名含 _readerthread」改为「异常栈帧位于 ibapi 包内」：
+    #   Python 3.11 会把 Thread(target=self._readerthread) 自动命名为 `Thread-N (_readerthread)`，
+    #   而 subprocess.py（main.py _is_script_running 的 PowerShell 调用）恰好有同名方法 —— 其
+    #   GBK 解码 UnicodeDecodeError 曾被本钩子误判为 IB 协议杂音，误触发 disconnect_from_ib
+    #   断连（幻影根因）。ibapi 包内 grep `_readerthread` 零命中，真实协议层解码在
+    #   decoder/utils，栈帧必落在 ibapi 包目录下，按帧文件路径判定才准确。
+    try:
+        import ibapi as _ibapi_pkg
+        import os as _os
+        pkg_dir = _os.path.dirname(_os.path.abspath(_ibapi_pkg.__file__))
+        while exc_tb is not None:
+            fn = _os.path.abspath(exc_tb.tb_frame.f_code.co_filename)
+            if fn.startswith(pkg_dir):
+                return True
+            exc_tb = exc_tb.tb_next
+    except Exception:
+        return False
+    return False
+
+
 def _ib_thread_excepthook(args):
     exc_type, exc_value, exc_tb, thread = (
         args.exc_type, args.exc_value, args.exc_traceback, args.thread
     )
-    # 仅捕获 ibapi EReader 线程的协议层解码异常（已知的 Gateway 重启杂音）
-    if exc_type is UnicodeDecodeError and thread is not None and '_readerthread' in thread.name:
+    # 仅捕获 ibapi 包内抛出的协议层解码异常（已知的 Gateway 重启杂音），触发自愈重连
+    if exc_type is UnicodeDecodeError and _raised_inside_ibapi(exc_tb):
         logger.warning(
             f"[IB] EReader线程解码异常(协议层杂音,非致命),触发自愈重连: {exc_value}"
         )

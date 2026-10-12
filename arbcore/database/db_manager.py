@@ -258,7 +258,7 @@ class DatabaseManager:
             # [AI-2026-09-23] 分类级暂停功能(paused_categories)与死字段(skip_qdii_asia_index)已删除（见 docs/013_7）。
             #   不再写入任何种子；存量库的这两行由运维脚本/手动 DELETE 清理。
 
-            conn.execute('''CREATE TABLE IF NOT EXISTS unified_fund_list (category TEXT, fund_code TEXT PRIMARY KEY, fund_name TEXT, related_index TEXT, pos_ratio REAL DEFAULT 0.95, target_type TEXT DEFAULT 'ETF')''')
+            conn.execute('''CREATE TABLE IF NOT EXISTS unified_fund_list (category TEXT, fund_code TEXT PRIMARY KEY, fund_name TEXT, related_index TEXT, pos_ratio REAL DEFAULT 0.95, target_type TEXT DEFAULT 'ETF', data_source TEXT DEFAULT '')''')
             # [AI-2026-07-25] 已删除 jsl_fund_list 建表（表已废弃，零调用方死代码）
             # [AI-2026-07-25] 补齐 fund_watchlist：原代码从未建此表，全新环境会 no such table 导致"我的关注"报错。加 IF NOT EXISTS 保护。
             conn.execute('''CREATE TABLE IF NOT EXISTS fund_watchlist (fund_code TEXT PRIMARY KEY, added_at TIMESTAMP DEFAULT (datetime('now','localtime')))''')
@@ -268,6 +268,13 @@ class DatabaseManager:
             try: conn.execute("ALTER TABLE unified_fund_list ADD COLUMN idx_code TEXT DEFAULT '-'")
             except sqlite3.OperationalError: pass
             try: conn.execute("ALTER TABLE unified_fund_list ADD COLUMN idx_name TEXT DEFAULT '-'")
+            except sqlite3.OperationalError: pass
+            # [AI-2026-10-11 东哥定调] 新增 data_source 列：标记「数据源 / 估值办法」——
+            #   'woody' = 采用 woody 估值办法、需从 woody API 取 position/hedge 等因子；
+            #   'm0' / 'silver' / ''（空）等 = 非 woody（商品期货 / 程序自算指数估值）。
+            #   该信息原先只存 lof_config.yaml 的 data_source 字段，step1 抓取范围据此筛选；
+            #   DB 权威化后，抓取范围改读本列（YAML 仅退化兜底），与 step5 的 symbol_master 同源手法。
+            try: conn.execute("ALTER TABLE unified_fund_list ADD COLUMN data_source TEXT DEFAULT ''")
             except sqlite3.OperationalError: pass
 
             # JSL Index history and realtime tables

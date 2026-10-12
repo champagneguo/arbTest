@@ -69,7 +69,8 @@ const colorStyle = computed(() => {
 
 <style scoped>
 .num-cell {
-  font-family: 'Courier New', Consolas, monospace;
+  /* [AI-2026-10-12 重做 统一字体/表头] 数字单元统一引用 mono 字体 token */
+  font-family: var(--co-font-mono);
   font-size: 12px;
 }
 .num-cell.strong {

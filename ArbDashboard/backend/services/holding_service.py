@@ -2064,6 +2064,11 @@ class HoldingService:
         公开入口，包装 _fallback_fill_missing_etf（专供 /api/fund/oil-refetch-prices 调用）。
         本地为价格权威（东哥铁律）：只补本地缺口，绝不从 ARM 反向覆盖本地已有值。
         返回 {reference_date, filled:{sym:price}, still_missing:[...]}，绝不抛异常。
+
+        [AI-2026-10-11 东哥拍板]**定位降级为「人工应急」**：东哥第一性原理 ——
+          **ARM 必须自主爬数据，不能依赖本机去纠偏**。ARM 侧正解 = sampler 多个补采时点自愈 +
+          缺数报警（而非等本机来救）。本方法保留作**人工应急通道**（仅本机可调；
+          ARM 侧 nginx 已对 `/api/fund/oil-refetch-prices` 返回 403，用户根本调不到）。
         """
         conn = self._get_conn()
         try:
@@ -2207,8 +2212,16 @@ print(json.dumps({'clock': clock, 'latest': latest, 'syms': out}))
     def push_usa_etf_to_arm(self) -> Dict[str, Any]:
         """[AI-2026-09-24] 本机 → ARM 推送 usa_etf_daily_prices（增量 INSERT OR REPLACE）。
 
-        本机为价格权威（东哥铁律）。触发场景：ARM 采集未拿到 T-1 收盘价（源延迟），
-        或 JP/CH 标的（1699/1671/OILUSA）本就不在 ARM 采集器标的表内 —— 只能由本机推。
+        [AI-2026-10-11 东哥拍板]**降级为「历史回填 / 人工补推专用」，不再是日常链路**。
+          理由（第一性原理）：ARM 是主力部署（面向 `9eastray.com`，本机不保证每天开机），
+          **必须自主取数**。ARM 侧通路现已完备：
+            · ARM `arb-dashboard.service`（`ARB_MORNING_REFRESH_AT=08:00`）→ `--refresh-morning`
+              → `_run_pipeline → step5` **自己从东京 VPS 拉 `usa_prices_*.json`**；
+            · ARM `usa-etf-history.timer`（07:30）自采 VPS 未覆盖的 7 只
+              （CRUD/BRNT/03175/**SLV**/OILUSA/1671/1699）—— **JP/CH 三只已入 ARM 采集表**
+              （旧注释"只能由本机推"已过时，2026-09-26 起 sampler 已自动化）。
+
+        触发场景（仅人工）：新机初始化补齐历史、或 ARM 长期离线后一次性回填。
 
         安全约束（第一性原理：不制造删数风险）：
         - 只 INSERT OR REPLACE，【绝不 DELETE】：ARM 行数只增不减，本机缺数也不会清空 ARM；
